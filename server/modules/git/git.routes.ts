@@ -4,7 +4,7 @@ import path from 'path';
 import express from 'express';
 
 import type { ProviderRunFunction } from '@/shared/types.js';
-import { AppError, getGitErrorDetails } from '@/shared/utils.js';
+import { AppError, getGitErrorDetails, requireAuthenticatedUserId } from '@/shared/utils.js';
 
 // cross-spawn: drop-in spawn with Windows .cmd/PATHEXT resolution.
 import { parseGitLogWithStats, parseGitStatusOutput } from './git-parsing.service.js';
@@ -15,6 +15,8 @@ type GitRouterDependencies = {
   fileSystem: typeof import('node:fs/promises');
   spawnProcess: typeof import('cross-spawn').default;
   resolveProjectPathById(projectId: string): string | null;
+  /** The environment for a git command that talks to `remoteUrl`: the user's stored forge credential, prompts off. */
+  resolveRemoteEnvironment(remoteUrl: string, userId: number): NodeJS.ProcessEnv;
   queryClaude: ProviderRunFunction;
   queryCursor: ProviderRunFunction;
 };
@@ -28,6 +30,7 @@ const queryClaudeSDK = dependencies.queryClaude;
 const spawnCursor = dependencies.queryCursor;
 const router = express.Router();
 const COMMIT_DIFF_CHARACTER_LIMIT = 500_000;
+const MISSING_REMOTE_CREDENTIAL_DETAILS = 'The remote asked for credentials and none were available. For a Forgejo repository, add a token for its instance in Settings; otherwise configure a git credential helper or use an SSH remote.';
 
 function spawnAsync(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -136,6 +139,21 @@ async function getActualProjectPath(projectId) {
     throw new Error(`Unable to resolve project path for "${projectId}"`);
   }
   return validateProjectPath(projectPath);
+}
+
+/**
+ * The environment for a fetch/pull/push against `remoteName`: git itself
+ * knows nothing about the tokens stored in Settings, so a Forgejo remote would
+ * otherwise fail with "could not read Username". `--push` reads the push URL,
+ * which can differ from the fetch URL.
+ */
+async function getRemoteEnvironment(req, projectPath, remoteName, { push = false } = {}) {
+  const { stdout } = await spawnAsync(
+    'git',
+    ['remote', 'get-url', ...(push ? ['--push'] : []), remoteName],
+    { cwd: projectPath },
+  );
+  return dependencies.resolveRemoteEnvironment(stdout.trim(), requireAuthenticatedUserId(req));
 }
 
 // Helper function to strip git diff headers
@@ -1351,18 +1369,22 @@ router.post('/fetch', async (req, res) => {
     }
 
     validateRemoteName(remoteName);
-    const { stdout } = await spawnAsync('git', ['fetch', remoteName], { cwd: projectPath });
+    const env = await getRemoteEnvironment(req, projectPath, remoteName);
+    const { stdout } = await spawnAsync('git', ['fetch', remoteName], { cwd: projectPath, env });
 
     res.json({ success: true, output: stdout || 'Fetch completed successfully', remoteName });
   } catch (error) {
     console.error('Git fetch error:', error);
+    const gitError = getGitErrorDetails(error);
     res.status(500).json({ 
       error: 'Fetch failed', 
-      details: error.message.includes('Could not resolve hostname') 
+      details: gitError.includes('Could not resolve hostname') 
         ? 'Unable to connect to remote repository. Check your internet connection.'
-        : error.message.includes('fatal: \'origin\' does not appear to be a git repository')
+        : gitError.includes('fatal: \'origin\' does not appear to be a git repository')
         ? 'No remote repository configured. Add a remote with: git remote add origin <url>'
-        : error.message
+        : gitError.includes('could not read Username')
+        ? MISSING_REMOTE_CREDENTIAL_DETAILS
+        : gitError
     });
   }
 });
@@ -1396,7 +1418,8 @@ router.post('/pull', async (req, res) => {
 
     validateRemoteName(remoteName);
     validateBranchName(remoteBranch);
-    const { stdout } = await spawnAsync('git', ['pull', remoteName, remoteBranch], { cwd: projectPath });
+    const env = await getRemoteEnvironment(req, projectPath, remoteName);
+    const { stdout } = await spawnAsync('git', ['pull', remoteName, remoteBranch], { cwd: projectPath, env });
 
     res.json({
       success: true,
@@ -1406,26 +1429,30 @@ router.post('/pull', async (req, res) => {
     });
   } catch (error) {
     console.error('Git pull error:', error);
+    const gitError = getGitErrorDetails(error);
 
     // Enhanced error handling for common pull scenarios
     let errorMessage = 'Pull failed';
-    let details = error.message;
+    let details = gitError;
     
-    if (error.message.includes('CONFLICT')) {
+    if (gitError.includes('CONFLICT')) {
       errorMessage = 'Merge conflicts detected';
       details = 'Pull created merge conflicts. Please resolve conflicts manually in the editor, then commit the changes.';
-    } else if (error.message.includes('Please commit your changes or stash them')) {
+    } else if (gitError.includes('Please commit your changes or stash them')) {
       errorMessage = 'Uncommitted changes detected';  
       details = 'Please commit or stash your local changes before pulling.';
-    } else if (error.message.includes('Could not resolve hostname')) {
+    } else if (gitError.includes('Could not resolve hostname')) {
       errorMessage = 'Network error';
       details = 'Unable to connect to remote repository. Check your internet connection.';
-    } else if (error.message.includes('fatal: \'origin\' does not appear to be a git repository')) {
+    } else if (gitError.includes('fatal: \'origin\' does not appear to be a git repository')) {
       errorMessage = 'Remote not configured';
       details = 'No remote repository configured. Add a remote with: git remote add origin <url>';
-    } else if (error.message.includes('diverged')) {
+    } else if (gitError.includes('diverged')) {
       errorMessage = 'Branches have diverged';
       details = 'Your local branch and remote branch have diverged. Consider fetching first to review changes.';
+    } else if (gitError.includes('could not read Username')) {
+      errorMessage = 'Authentication failed';
+      details = MISSING_REMOTE_CREDENTIAL_DETAILS;
     }
     
     res.status(500).json({ 
@@ -1464,7 +1491,8 @@ router.post('/push', async (req, res) => {
 
     validateRemoteName(remoteName);
     validateBranchName(remoteBranch);
-    const { stdout } = await spawnAsync('git', ['push', remoteName, remoteBranch], { cwd: projectPath });
+    const env = await getRemoteEnvironment(req, projectPath, remoteName, { push: true });
+    const { stdout } = await spawnAsync('git', ['push', remoteName, remoteBranch], { cwd: projectPath, env });
 
     res.json({
       success: true,
@@ -1474,27 +1502,31 @@ router.post('/push', async (req, res) => {
     });
   } catch (error) {
     console.error('Git push error:', error);
+    const gitError = getGitErrorDetails(error);
     
     // Enhanced error handling for common push scenarios
     let errorMessage = 'Push failed';
-    let details = error.message;
+    let details = gitError;
     
-    if (error.message.includes('rejected')) {
+    if (gitError.includes('rejected')) {
       errorMessage = 'Push rejected';
       details = 'The remote has newer commits. Pull first to merge changes before pushing.';
-    } else if (error.message.includes('non-fast-forward')) {
+    } else if (gitError.includes('non-fast-forward')) {
       errorMessage = 'Non-fast-forward push';
       details = 'Your branch is behind the remote. Pull the latest changes first.';
-    } else if (error.message.includes('Could not resolve hostname')) {
+    } else if (gitError.includes('Could not resolve hostname')) {
       errorMessage = 'Network error';
       details = 'Unable to connect to remote repository. Check your internet connection.';
-    } else if (error.message.includes('fatal: \'origin\' does not appear to be a git repository')) {
+    } else if (gitError.includes('fatal: \'origin\' does not appear to be a git repository')) {
       errorMessage = 'Remote not configured';
       details = 'No remote repository configured. Add a remote with: git remote add origin <url>';
-    } else if (error.message.includes('Permission denied')) {
+    } else if (gitError.includes('Permission denied')) {
       errorMessage = 'Authentication failed';
       details = 'Permission denied. Check your credentials or SSH keys.';
-    } else if (error.message.includes('no upstream branch')) {
+    } else if (gitError.includes('could not read Username')) {
+      errorMessage = 'Authentication failed';
+      details = MISSING_REMOTE_CREDENTIAL_DETAILS;
+    } else if (gitError.includes('no upstream branch')) {
       errorMessage = 'No upstream branch';
       details = 'No upstream branch configured. Use: git push --set-upstream origin <branch>';
     }
@@ -1549,7 +1581,8 @@ router.post('/publish', async (req, res) => {
 
     // Publish the branch (set upstream and push)
     validateRemoteName(remoteName);
-    const { stdout } = await spawnAsync('git', ['push', '--set-upstream', remoteName, branch], { cwd: projectPath });
+    const env = await getRemoteEnvironment(req, projectPath, remoteName, { push: true });
+    const { stdout } = await spawnAsync('git', ['push', '--set-upstream', remoteName, branch], { cwd: projectPath, env });
     
     res.json({ 
       success: true, 
@@ -1559,23 +1592,27 @@ router.post('/publish', async (req, res) => {
     });
   } catch (error) {
     console.error('Git publish error:', error);
+    const gitError = getGitErrorDetails(error);
     
     // Enhanced error handling for common publish scenarios
     let errorMessage = 'Publish failed';
-    let details = error.message;
+    let details = gitError;
     
-    if (error.message.includes('rejected')) {
+    if (gitError.includes('rejected')) {
       errorMessage = 'Publish rejected';
       details = 'The remote branch already exists and has different commits. Use push instead.';
-    } else if (error.message.includes('Could not resolve hostname')) {
+    } else if (gitError.includes('Could not resolve hostname')) {
       errorMessage = 'Network error';
       details = 'Unable to connect to remote repository. Check your internet connection.';
-    } else if (error.message.includes('Permission denied')) {
+    } else if (gitError.includes('Permission denied')) {
       errorMessage = 'Authentication failed';
       details = 'Permission denied. Check your credentials or SSH keys.';
-    } else if (error.message.includes('fatal:') && error.message.includes('does not appear to be a git repository')) {
+    } else if (gitError.includes('fatal:') && gitError.includes('does not appear to be a git repository')) {
       errorMessage = 'Remote not configured';
       details = 'Remote repository not properly configured. Check your remote URL.';
+    } else if (gitError.includes('could not read Username')) {
+      errorMessage = 'Authentication failed';
+      details = MISSING_REMOTE_CREDENTIAL_DETAILS;
     }
     
     res.status(500).json({ 

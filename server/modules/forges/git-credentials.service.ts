@@ -1,3 +1,5 @@
+import { forgejoTokensDb } from '@/modules/database/index.js';
+import { parseRepositoryUrl, resolveForgejoInstanceUrl } from '@/modules/forges/repository-url.service.js';
 import type { GitForge, ParsedRepositoryUrl } from '@/shared/types.js';
 
 /** The only origin a GitHub token is ever offered to. */
@@ -55,4 +57,44 @@ export function buildTokenCredentialEnvironment(
     CLOUDCLI_GIT_TOKEN: token,
     GIT_TERMINAL_PROMPT: '0',
   };
+}
+
+/**
+ * The environment a git network command (fetch, pull, push) on an existing
+ * checkout runs in for one user, given the URL of the remote it talks to.
+ *
+ * When the remote is an https repository on a Forgejo instance the user stored
+ * a token for, the token is offered to that origin only (see
+ * `buildTokenCredentialEnvironment`). Anything else — GitHub, ssh remotes,
+ * hosts without a stored token — keeps the machine's own credentials (a `gh`
+ * helper, SSH keys) as before. GitHub tokens are not injected here: they
+ * would shadow a helper such as `gh auth git-credential` the user relies on.
+ * Prompts are always disabled, so a missing credential fails at once instead
+ * of git waiting on the server's terminal.
+ *
+ * Used by the git module's Source Control fetch, pull, push and publish routes.
+ */
+export function buildRemoteCredentialEnvironment(
+  remoteUrl: string,
+  userId: number,
+  baseEnvironment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const promptlessEnvironment = { ...baseEnvironment, GIT_TERMINAL_PROMPT: '0' };
+  const repository = parseRepositoryUrl(remoteUrl);
+  if (!repository || repository.transport !== 'https') {
+    return promptlessEnvironment;
+  }
+
+  const knownInstanceUrls = forgejoTokensDb.getForgejoInstanceUrls(userId);
+  const instanceUrl = resolveForgejoInstanceUrl(repository, knownInstanceUrls);
+  if (!knownInstanceUrls.includes(instanceUrl)) {
+    return promptlessEnvironment;
+  }
+
+  const token = forgejoTokensDb.getActiveForgejoToken(userId, instanceUrl);
+  const credentialOrigin = getTokenCredentialOrigin('forgejo', repository);
+  if (!token || !credentialOrigin) {
+    return promptlessEnvironment;
+  }
+  return buildTokenCredentialEnvironment(token, credentialOrigin, baseEnvironment);
 }

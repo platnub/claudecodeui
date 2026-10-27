@@ -452,13 +452,14 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
         // Execute git clone. The host was validated by resolveCloneTarget;
         // the helper is still scoped to that one https origin (github.com, or
         // the Forgejo instance) so the token can answer no other challenge
-        // (a redirect, say).
+        // (a redirect, say). Without a token, prompts stay off so a private
+        // repository fails instead of blocking on the server's terminal.
         const gitEnvironment = token
           ? buildTokenCredentialEnvironment(
             token,
             getTokenCredentialOrigin(cloneTarget.forge, cloneTarget.repository),
           )
-          : process.env;
+          : { ...process.env, GIT_TERMINAL_PROMPT: '0' };
         const gitProcess = spawn('git', ['clone', '--depth', '1', '--', cloneUrl, cloneDir], {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: gitEnvironment
@@ -1258,11 +1259,22 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
               });
             });
 
-            // Push the branch to remote
+            // Push the branch to remote. `repoUrl` is origin's URL (read from
+            // it, or the URL the API itself cloned origin from), and the forge
+            // was checked against its host above, so the token is scoped to
+            // origin's https origin. Forgejo over ssh/http has no such origin:
+            // the push then relies on the machine's ssh keys and never sees
+            // the token. Prompts stay off so git cannot block on the server's
+            // terminal.
             console.log('🔄 Pushing branch to remote...');
+            const pushCredentialOrigin = getTokenCredentialOrigin(forge, repository);
+            const pushEnvironment = pushCredentialOrigin
+              ? buildTokenCredentialEnvironment(tokenToUse, pushCredentialOrigin)
+              : { ...process.env, GIT_TERMINAL_PROMPT: '0' };
             const pushProcess = spawn('git', ['push', '-u', 'origin', finalBranchName], {
               cwd: finalProjectPath,
-              stdio: 'pipe'
+              stdio: 'pipe',
+              env: pushEnvironment
             });
 
             await new Promise((resolve, reject) => {

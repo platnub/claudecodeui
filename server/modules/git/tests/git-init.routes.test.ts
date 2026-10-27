@@ -25,6 +25,7 @@ test('git init does not run when repository validation fails for an execution er
     fileSystem: { access: async () => undefined } as unknown as Parameters<typeof createGitRouter>[0]['fileSystem'],
     spawnProcess,
     resolveProjectPathById: () => '/workspace/repo',
+    resolveRemoteEnvironment: () => { throw new Error('unexpected remote access'); },
     queryClaude: unexpectedProvider,
     queryCursor: unexpectedProvider,
   });
@@ -74,6 +75,7 @@ test('delete branch parses force and uses Git force deletion', async () => {
     fileSystem: { access: async () => undefined } as unknown as Parameters<typeof createGitRouter>[0]['fileSystem'],
     spawnProcess,
     resolveProjectPathById: () => '/workspace/repo',
+    resolveRemoteEnvironment: () => { throw new Error('unexpected remote access'); },
     queryClaude: unexpectedProvider,
     queryCursor: unexpectedProvider,
   });
@@ -110,6 +112,7 @@ test('delete branch rejects a non-boolean force value before running Git', async
     fileSystem: { access: async () => undefined } as unknown as Parameters<typeof createGitRouter>[0]['fileSystem'],
     spawnProcess,
     resolveProjectPathById: () => '/workspace/repo',
+    resolveRemoteEnvironment: () => { throw new Error('unexpected remote access'); },
     queryClaude: unexpectedProvider,
     queryCursor: unexpectedProvider,
   });
@@ -132,4 +135,63 @@ test('delete branch rejects a non-boolean force value before running Git', async
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test('fetch runs git with the credential environment of the remote it fetches from', async () => {
+  const commands: { args: string[]; env: NodeJS.ProcessEnv | undefined }[] = [];
+  const spawnProcess = ((_command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+    commands.push({ args, env: options.env });
+    const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; stderr: PassThrough };
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args.includes('--is-inside-work-tree')) child.stdout.write('true\n');
+      if (args.includes('--show-toplevel')) child.stdout.write('/workspace/repo\n');
+      if (args[0] === 'symbolic-ref') child.stdout.write('main\n');
+      if (args.includes('main@{upstream}')) child.stdout.write('origin/main\n');
+      if (args[0] === 'remote') child.stdout.write('https://git.example.com/team/repo.git\n');
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('close', 0);
+    });
+    return child;
+  }) as unknown as Parameters<typeof createGitRouter>[0]['spawnProcess'];
+  const remoteLookups: [string, number][] = [];
+  const unexpectedProvider = async (): Promise<never> => { throw new Error('unexpected provider call'); };
+  const router = createGitRouter({
+    fileSystem: { access: async () => undefined } as unknown as Parameters<typeof createGitRouter>[0]['fileSystem'],
+    spawnProcess,
+    resolveProjectPathById: () => '/workspace/repo',
+    resolveRemoteEnvironment: (remoteUrl, userId) => {
+      remoteLookups.push([remoteUrl, userId]);
+      return { CLOUDCLI_GIT_TOKEN: 'forgejo_secret' };
+    },
+    queryClaude: unexpectedProvider,
+    queryCursor: unexpectedProvider,
+  });
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as express.Request & { user: { id: number } }).user = { id: 7 };
+    next();
+  });
+  app.use('/api/git', router);
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const address = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/git/fetch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project: 'project-1' }),
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  assert.deepEqual(remoteLookups, [['https://git.example.com/team/repo.git', 7]]);
+  assert.deepEqual(commands.at(-2)?.args, ['remote', 'get-url', 'origin']);
+  assert.deepEqual(commands.at(-1), { args: ['fetch', 'origin'], env: { CLOUDCLI_GIT_TOKEN: 'forgejo_secret' } });
 });
