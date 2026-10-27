@@ -83,9 +83,10 @@ async function withProjectsServer(
 
 const cloneBody = {
   path: '/workspace/root',
-  githubUrl: 'https://github.com/example/repo.git',
-  githubTokenId: null,
-  newGithubToken: 'ghp_supersecrettoken1234567890abcd',
+  repositoryUrl: 'https://github.com/example/repo.git',
+  forge: 'github',
+  tokenId: null,
+  newToken: 'ghp_supersecrettoken1234567890abcd',
 };
 
 async function postClone(baseUrl: string, userId: number, body: Record<string, unknown> = cloneBody) {
@@ -136,7 +137,7 @@ test('POST /clone requires an authenticated user', async () => {
 test('GET /clone-progress streams the clone the id names, then retires the id', async () => {
   const inputs: CloneInput[] = [];
   await withProjectsServer({ startCloneProject: createFakeCloneRunner(inputs) }, async (baseUrl) => {
-    const { body } = await postClone(baseUrl, 7, { ...cloneBody, githubTokenId: 12, newGithubToken: null });
+    const { body } = await postClone(baseUrl, 7, { ...cloneBody, forge: null, tokenId: 12, newToken: null });
     assert.equal(inputs.length, 0, 'the POST alone must not start a clone');
 
     const stream = await openProgress(baseUrl, 7, body.cloneId ?? '');
@@ -147,14 +148,54 @@ test('GET /clone-progress streams the clone the id names, then retires the id', 
     assert.equal(stream.events[0]?.message, 'Receiving objects: 100% (20/20), done.');
     assert.deepEqual(inputs, [{
       workspacePath: '/workspace/root',
-      githubUrl: 'https://github.com/example/repo.git',
-      githubTokenId: 12,
-      newGithubToken: null,
+      repositoryUrl: 'https://github.com/example/repo.git',
+      forge: null,
+      tokenId: 12,
+      newToken: null,
       userId: 7,
     }]);
 
     const replay = await openProgress(baseUrl, 7, body.cloneId ?? '');
     assert.equal(replay.status, 404, 'a claimed id must not run the clone twice');
+  });
+});
+
+test('POST /clone still accepts the GitHub-only field names and treats a typed token as GitHub', async () => {
+  const inputs: CloneInput[] = [];
+  await withProjectsServer({ startCloneProject: createFakeCloneRunner(inputs) }, async (baseUrl) => {
+    const { body } = await postClone(baseUrl, 3, {
+      path: '/workspace/root',
+      githubUrl: 'https://github.com/example/repo.git',
+      githubTokenId: null,
+      newGithubToken: 'ghp_legacy',
+    });
+    await openProgress(baseUrl, 3, body.cloneId ?? '');
+
+    assert.deepEqual(inputs, [{
+      workspacePath: '/workspace/root',
+      repositoryUrl: 'https://github.com/example/repo.git',
+      forge: 'github',
+      tokenId: null,
+      newToken: 'ghp_legacy',
+      userId: 3,
+    }]);
+  });
+});
+
+test('POST /clone carries a Forgejo choice through to the clone', async () => {
+  const inputs: CloneInput[] = [];
+  await withProjectsServer({ startCloneProject: createFakeCloneRunner(inputs) }, async (baseUrl) => {
+    const { body } = await postClone(baseUrl, 3, {
+      path: '/workspace/root',
+      repositoryUrl: 'https://git.example.com/team/repo.git',
+      forge: 'forgejo',
+      tokenId: 5,
+    });
+    await openProgress(baseUrl, 3, body.cloneId ?? '');
+
+    assert.equal(inputs[0]?.forge, 'forgejo');
+    assert.equal(inputs[0]?.tokenId, 5);
+    assert.equal(inputs[0]?.repositoryUrl, 'https://git.example.com/team/repo.git');
   });
 });
 
@@ -165,8 +206,8 @@ test('GET /clone-progress hands the posted token to the clone without it touchin
     const stream = await openProgress(baseUrl, 1, body.cloneId ?? '');
 
     assert.equal(stream.status, 200);
-    assert.equal(inputs[0]?.newGithubToken, cloneBody.newGithubToken);
-    assert.ok(!(body.cloneId ?? '').includes(cloneBody.newGithubToken));
+    assert.equal(inputs[0]?.newToken, cloneBody.newToken);
+    assert.ok(!(body.cloneId ?? '').includes(cloneBody.newToken));
   });
 });
 

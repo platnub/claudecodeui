@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
+import type { GitForge } from '@/shared/types.js';
+
 export type PendingCloneRequest = {
   workspacePath: string;
-  githubUrl: string;
-  githubTokenId: number | null;
-  newGithubToken: string | null;
+  repositoryUrl: string;
+  forge: GitForge | null;
+  tokenId: number | null;
+  newToken: string | null;
 };
 
 export type PendingCloneRequests = {

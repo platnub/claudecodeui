@@ -3,6 +3,7 @@ import {
   getStoredAuthToken,
   storeAuthToken,
 } from '@/shared/authToken';
+import type { GitForge } from '@/shared/types';
 import { IS_PLATFORM } from '@/shared/utils';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
 
@@ -244,15 +245,20 @@ export const api = {
     post('/api/projects/migrate-legacy-stars', { projectIds }),
   toggleProjectStar: (projectId: string) =>
     post(`/api/projects/${encodeURIComponent(projectId)}/toggle-star`),
-  // A clone is two requests: the details (GitHub token included) go in this
+  // A clone is two requests: the details (forge token included) go in this
   // POST body, and the returned `cloneId` is all the progress stream's URL
   // carries — URLs land in access logs, proxy logs and browser history.
+  // `forge` null lets the server detect GitHub vs Forgejo from the URL.
   startProjectClone: (cloneRequest: {
     path: string;
-    githubUrl: string;
-    githubTokenId: number | null;
-    newGithubToken: string | null;
+    repositoryUrl: string;
+    forge: GitForge | null;
+    tokenId: number | null;
+    newToken: string | null;
   }) => post('/api/projects/clone', cloneRequest),
+  // Which forge (GitHub, Forgejo, or neither) a repository URL lives on.
+  detectRepositoryForge: (repositoryUrl: string) =>
+    get(`/api/forges/detect${query({ url: repositoryUrl })}`),
   // EventSource cannot send an Authorization header, so the token rides along as
   // a query parameter on the streaming endpoints below.
   cloneProjectProgressUrl: ({ cloneId }: { cloneId: string }) =>
@@ -558,6 +564,8 @@ export const api = {
       credentialType: string;
       credentialValue: string;
       description?: string;
+      // Required for per-instance credentials (forgejo_token): the instance URL.
+      serviceUrl?: string;
     }) => post('/api/settings/credentials', payload),
     deleteCredential: (credentialId: string) => del(`/api/settings/credentials/${credentialId}`),
     toggleCredential: (credentialId: string, isActive: boolean) =>

@@ -22,8 +22,8 @@ const settingsService = createSettingsService({
   },
   credentials: {
     list: (userId, type) => credentialsDb.getCredentials(userId, type),
-    create: (userId, name, type, value, description) =>
-      credentialsDb.createCredential(userId, name, type, value, description),
+    create: (userId, name, type, value, description, serviceUrl) =>
+      credentialsDb.createCredential(userId, name, type, value, description, serviceUrl),
     remove: (userId, credentialId) => credentialsDb.deleteCredential(userId, credentialId),
     toggle: (userId, credentialId, isActive) =>
       credentialsDb.toggleCredential(userId, credentialId, isActive),

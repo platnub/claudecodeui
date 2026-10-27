@@ -52,3 +52,48 @@ test('subscribeToPush persists the subscription and enables Web Push', () => {
   });
   assert.deepEqual(operations, ['save:https://push.example.test', 'preferences', 'notify']);
 });
+
+test('createCredential stores a Forgejo token with its normalized https instance', () => {
+  const created: unknown[][] = [];
+  const service = createSettingsService(dependencies({
+    credentials: {
+      list: () => [],
+      create: (...args) => { created.push(args); return {}; },
+      remove: () => false,
+      toggle: () => false,
+    },
+  }));
+
+  service.createCredential(1, {
+    credentialName: 'Codeberg',
+    credentialType: 'forgejo_token',
+    credentialValue: 'secret',
+    serviceUrl: 'codeberg.org/',
+  });
+  service.createCredential(1, {
+    credentialName: 'GitHub',
+    credentialType: 'github_token',
+    credentialValue: 'ghp_secret',
+    serviceUrl: 'https://ignored.example',
+  });
+
+  assert.deepEqual(created, [
+    [1, 'Codeberg', 'forgejo_token', 'secret', null, 'https://codeberg.org'],
+    [1, 'GitHub', 'github_token', 'ghp_secret', null, null],
+  ]);
+});
+
+test('createCredential refuses a Forgejo token without an https instance URL', () => {
+  const service = createSettingsService(dependencies());
+  for (const serviceUrl of [undefined, '', 'http://git.example.com']) {
+    assert.throws(
+      () => service.createCredential(1, {
+        credentialName: 'Forgejo',
+        credentialType: 'forgejo_token',
+        credentialValue: 'secret',
+        serviceUrl,
+      }),
+      (error: { code?: string }) => error.code === 'CREDENTIAL_SERVICE_URL_INVALID',
+    );
+  }
+});

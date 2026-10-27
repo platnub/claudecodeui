@@ -470,6 +470,22 @@ const addProviderModelEffortColumns = (db: Database): void => {
   addColumnToTableIfNotExists(db, 'provider_models', columnNames, 'effort_default', 'TEXT DEFAULT NULL');
 };
 
+/**
+ * Adds `service_url` to stored credentials: the instance a per-instance
+ * credential belongs to. A Forgejo token is only valid on the instance that
+ * issued it, so the clone and pull-request paths need to know which one.
+ *
+ * Existing rows stay NULL: every credential stored before this column is a
+ * GitHub token, which is single-host.
+ */
+const addCredentialServiceUrlColumn = (db: Database): void => {
+  if (!tableExists(db, 'user_credentials')) {
+    return;
+  }
+  const columnNames = getTableInfo(db, 'user_credentials').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'user_credentials', columnNames, 'service_url', 'TEXT');
+};
+
 const ensureProjectsForSessionPaths = (db: Database): void => {
   if (!tableExists(db, 'sessions')) {
     return;
@@ -504,6 +520,7 @@ export const runMigrations = (db: Database) => {
       'BOOLEAN DEFAULT 0'
     );
 
+    addCredentialServiceUrlColumn(db);
     db.exec(APP_CONFIG_TABLE_SCHEMA_SQL);
     db.exec(USER_NOTIFICATION_PREFERENCES_TABLE_SCHEMA_SQL);
     db.exec(VAPID_KEYS_TABLE_SCHEMA_SQL);

@@ -92,6 +92,25 @@ export function asyncHandler(
   };
 }
 
+/**
+ * Reads the numeric id of the user the auth middleware attached to `req`, or
+ * throws a 401 `AUTHENTICATION_REQUIRED` AppError when there is none.
+ *
+ * Use it in routes mounted behind `authenticateToken` (the forges routes and
+ * the projects clone routes) instead of reading `req.user` ad hoc; the id is
+ * always a number, so ownership checks compare like with like.
+ */
+export function requireAuthenticatedUserId(req: Request): number {
+  const userId = Number((req as Request & { user?: { id?: number | string } }).user?.id);
+  if (!Number.isFinite(userId)) {
+    throw new AppError('Authenticated user is required', {
+      code: 'AUTHENTICATION_REQUIRED',
+      statusCode: 401,
+    });
+  }
+  return userId;
+}
+
 // ---------------------------
 //----------------- QUEUED CHAT MESSAGE UTILITIES ------------
 /**

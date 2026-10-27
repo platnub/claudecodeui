@@ -3,9 +3,19 @@ import path from 'path';
 
 import express from 'express';
 
-import type { ProviderRunFunction } from '@/shared/types.js';
+import {
+  buildTokenCredentialEnvironment,
+  getBranchWebUrl,
+  getRepositoryWebUrl,
+  getTokenCredentialOrigin,
+  parseRepositoryUrl,
+} from '@/modules/forges/index.js';
+import type { GitForge, ProviderRunFunction } from '@/shared/types.js';
 
 import { normalizeProjectPath } from '../../shared/utils.js';
+
+/** The forges a run can clone from and open a pull request on. */
+const AGENT_FORGES: GitForge[] = ['github', 'forgejo'];
 
 /** The providers an Agent API run can start: the ones with a runtime and a model catalog. */
 const AGENT_RUN_PROVIDERS = ['claude', 'cursor', 'codex', 'opencode'];
@@ -27,6 +37,13 @@ type AgentRouterDependencies = {
   users: { getFirstUser(): unknown };
   apiKeys: { validateApiKey(apiKey: string): unknown };
   githubTokens: { getActiveGithubToken(userId: number): string | null };
+  /** Stored Forgejo tokens: one per instance, looked up by the instance a repository resolves to. */
+  forgejoTokens: { getActiveForgejoToken(userId: number, instanceUrl: string): string | null };
+  /** Forge detection and the Forgejo API; GitHub goes through `GithubClient`. */
+  forges: {
+    resolveRepositoryForge: typeof import('../forges/index.js').resolveRepositoryForge;
+    createForgejoPullRequest: typeof import('../forges/index.js').createForgejoPullRequest;
+  };
   projects: { createProjectPath(projectPath: string, customName: string | null): unknown };
   models: typeof import('../providers/index.js').providerModelsService;
   /** The session gateway: an API run gets an app session row like a chat send, so the UI can list, open and subscribe to it. */
@@ -46,7 +63,7 @@ type AgentRouterDependencies = {
 
 /**
  * Creates Agent routes around explicit authentication, repository, provider,
- * filesystem, subprocess, runtime, and GitHub dependencies.
+ * filesystem, subprocess, runtime, and forge (GitHub / Forgejo) dependencies.
  */
 export function createAgentRouter(dependencies: AgentRouterDependencies): express.Router {
   const fs = dependencies.fileSystem;
@@ -57,6 +74,8 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
   const userDb = dependencies.users;
   const apiKeysDb = dependencies.apiKeys;
   const githubTokensDb = dependencies.githubTokens;
+  const forgejoTokensDb = dependencies.forgejoTokens;
+  const forgeGateway = dependencies.forges;
   const projectsDb = dependencies.projects;
   const providerModelsService = dependencies.models;
   const sessionGateway = dependencies.sessions;
@@ -151,36 +170,87 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
   }
 
   /**
-   * Normalize GitHub URLs for comparison
-   * @param {string} url - GitHub URL
-   * @returns {string} - Normalized URL
+   * Normalize a repository URL for comparison, so an ssh remote and the https
+   * URL of the same repository compare equal.
+   * @param {string} url - Repository URL (https or ssh)
+   * @returns {string} - `host/sub-path/owner/repo`, lowercased
    */
-  function normalizeGitHubUrl(url) {
-    // Remove .git suffix
-    let normalized = url.replace(/\.git$/, '');
-    // Convert SSH to HTTPS format for comparison
-    normalized = normalized.replace(/^git@github\.com:/, 'https://github.com/');
-    // Remove trailing slash
-    normalized = normalized.replace(/\/$/, '');
-    return normalized.toLowerCase();
+  function normalizeRepositoryUrl(url) {
+    const repository = parseRepositoryUrl(url);
+    if (!repository) {
+      return url.trim().replace(/\.git$/, '').replace(/\/$/, '').toLowerCase();
+    }
+    return `${repository.host}${repository.basePath}/${repository.owner}/${repository.repo}`.toLowerCase();
   }
 
   /**
-   * Parse GitHub URL to extract owner and repo
-   * @param {string} url - GitHub URL (HTTPS or SSH)
-   * @returns {{owner: string, repo: string}} - Parsed owner and repo
+   * The stored or request-supplied token for a forge.
+   * @param {'github'|'forgejo'} forge - The repository's forge
+   * @param {string|null} instanceUrl - The Forgejo instance (null for GitHub)
+   * @param {object} requestTokens - `githubToken` / `forgejoToken` from the request
+   * @param {number} userId - The authenticated user
+   * @returns {string|null}
    */
-  function parseGitHubUrl(url) {
-    // Handle HTTPS URLs: https://github.com/owner/repo or https://github.com/owner/repo.git
-    // Handle SSH URLs: git@github.com:owner/repo or git@github.com:owner/repo.git
-    const match = url.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/);
-    if (!match) {
-      throw new Error('Invalid GitHub URL format');
+  function resolveForgeToken(forge, instanceUrl, requestTokens, userId) {
+    if (forge === 'github') {
+      return requestTokens.githubToken || githubTokensDb.getActiveGithubToken(userId);
     }
-    return {
-      owner: match[1],
-      repo: match[2].replace(/\.git$/, '')
-    };
+    return requestTokens.forgejoToken || forgejoTokensDb.getActiveForgejoToken(userId, instanceUrl);
+  }
+
+  /**
+   * Rejects a forge that cannot be the repository's host: GitHub lives only on
+   * github.com, and github.com is never a Forgejo instance. Detection never
+   * pairs them wrongly, but a caller's `forge` override can — and the token
+   * and the pull request would then go to a different host than the remote.
+   * Runs before cloning and before pushing a branch.
+   * @param {{forge: 'github'|'forgejo'|null, repository: {host: string}}} resolved - From resolveRepositoryForge
+   */
+  function assertForgeMatchesHost(resolved) {
+    if (resolved.forge === 'github' && resolved.repository.host !== 'github.com') {
+      throw new Error('Invalid GitHub URL');
+    }
+    if (resolved.forge === 'forgejo' && resolved.repository.host === 'github.com') {
+      throw new Error('github.com is GitHub, not a Forgejo instance');
+    }
+  }
+
+  /**
+   * Validates a clone URL and resolves its forge before git or a credential
+   * is involved: https only, no credentials in the URL, a link to the
+   * repository rather than one of its pages, and a host that is GitHub or a
+   * Forgejo instance.
+   * @param {string} repositoryUrl - The URL to clone
+   * @param {'github'|'forgejo'|null} forgeOverride - The forge the caller named, if any
+   * @param {number} userId - The authenticated user (whose stored instances count as Forgejo)
+   * @returns {Promise<{cloneUrl: string, forge: 'github'|'forgejo', repository: object, instanceUrl: string|null}>}
+   */
+  async function resolveCloneTarget(repositoryUrl, forgeOverride, userId) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(repositoryUrl);
+    } catch {
+      throw new Error('Invalid repository URL');
+    }
+    if (parsedUrl.protocol !== 'https:' || parsedUrl.username || parsedUrl.password) {
+      throw new Error('Invalid repository URL');
+    }
+    const cloneUrl = parsedUrl.toString();
+
+    const resolved = await forgeGateway.resolveRepositoryForge(cloneUrl, userId, forgeOverride);
+    if (!resolved) {
+      throw new Error('Invalid repository URL');
+    }
+    if (resolved.repository.webPagePath) {
+      throw new Error(
+        `This is a link to a page of the repository, not the repository itself. Use ${getRepositoryWebUrl(resolved.repository)}`,
+      );
+    }
+    assertForgeMatchesHost(resolved);
+    if (!resolved.forge) {
+      throw new Error('Unsupported repository host: only GitHub and Forgejo repositories can be cloned');
+    }
+    return { cloneUrl, ...resolved };
   }
 
   /**
@@ -310,16 +380,6 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
   }
 
   /**
-   * Create a new branch on GitHub using the API
-   * @param {Octokit} octokit - Octokit instance
-   * @param {string} owner - Repository owner
-   * @param {string} repo - Repository name
-   * @param {string} branchName - Name of the new branch
-   * @param {string} baseBranch - Base branch to branch from (default: 'main')
-   * @returns {Promise<void>}
-   */
-
-  /**
    * Create a pull request on GitHub
    * @param {Octokit} octokit - Octokit instance
    * @param {string} owner - Repository owner
@@ -349,32 +409,16 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
   }
 
   /**
-   * Clone a GitHub repository to a directory
-   * @param {string} githubUrl - GitHub repository URL
-   * @param {string} githubToken - Optional GitHub token for private repos
+   * Clone a GitHub or Forgejo repository to a directory
+   * @param {{cloneUrl: string, forge: 'github'|'forgejo', repository: object}} cloneTarget - From resolveCloneTarget
+   * @param {string|null} token - Optional forge token for private repos
    * @param {string} projectPath - Path for cloning the repository
    * @returns {Promise<{path: string, created: boolean}>} - Checkout path and ownership flag
    */
-  async function cloneGitHubRepo(githubUrl, githubToken = null, projectPath) {
+  async function cloneRepository(cloneTarget, token = null, projectPath) {
     return new Promise(async (resolve, reject) => {
       try {
-        // Validate the host before using credentials or invoking Git.
-        let parsedGithubUrl;
-        try {
-          parsedGithubUrl = new URL(githubUrl);
-        } catch {
-          throw new Error('Invalid GitHub URL');
-        }
-        if (
-          parsedGithubUrl.protocol !== 'https:'
-          || parsedGithubUrl.hostname !== 'github.com'
-          || parsedGithubUrl.username
-          || parsedGithubUrl.password
-        ) {
-          throw new Error('Invalid GitHub URL');
-        }
-        const cloneUrl = parsedGithubUrl.toString();
-
+        const cloneUrl = cloneTarget.cloneUrl;
         const cloneDir = path.resolve(projectPath);
 
         // Check if directory already exists
@@ -383,14 +427,14 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
           // Directory exists - check if it's a git repo with the same URL
           try {
             const existingUrl = await getGitRemoteUrl(cloneDir);
-            const normalizedExisting = normalizeGitHubUrl(existingUrl);
-            const normalizedRequested = normalizeGitHubUrl(cloneUrl);
+            const normalizedExisting = normalizeRepositoryUrl(existingUrl);
+            const normalizedRequested = normalizeRepositoryUrl(cloneUrl);
 
             if (normalizedExisting === normalizedRequested) {
               console.log('✅ Repository already exists at path with correct URL');
               return resolve({ path: cloneDir, created: false });
             } else {
-              throw new Error(`Directory ${cloneDir} already exists with a different repository (${existingUrl}). Expected: ${githubUrl}`);
+              throw new Error(`Directory ${cloneDir} already exists with a different repository (${existingUrl}). Expected: ${cloneUrl}`);
             }
           } catch (gitError) {
             throw new Error(`Directory ${cloneDir} already exists but is not a valid git repository or git command failed`);
@@ -402,22 +446,19 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
         // Ensure parent directory exists
         await fs.mkdir(path.dirname(cloneDir), { recursive: true });
 
-        console.log('🔄 Cloning repository:', githubUrl);
+        console.log(`🔄 Cloning ${cloneTarget.forge} repository:`, cloneUrl);
         console.log('📁 Destination:', cloneDir);
 
-        // Execute git clone. The host was validated above; the helper is
-        // still scoped to github.com over https so the token can answer no
-        // other challenge (a redirect, say).
-        const gitEnvironment = githubToken ? {
-          ...process.env,
-          GIT_CONFIG_COUNT: '2',
-          GIT_CONFIG_KEY_0: 'credential.helper',
-          GIT_CONFIG_VALUE_0: '',
-          GIT_CONFIG_KEY_1: 'credential.https://github.com.helper',
-          GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$CLOUDCLI_GITHUB_TOKEN"; }; f',
-          CLOUDCLI_GITHUB_TOKEN: githubToken,
-          GIT_TERMINAL_PROMPT: '0'
-        } : process.env;
+        // Execute git clone. The host was validated by resolveCloneTarget;
+        // the helper is still scoped to that one https origin (github.com, or
+        // the Forgejo instance) so the token can answer no other challenge
+        // (a redirect, say).
+        const gitEnvironment = token
+          ? buildTokenCredentialEnvironment(
+            token,
+            getTokenCredentialOrigin(cloneTarget.forge, cloneTarget.repository),
+          )
+          : process.env;
         const gitProcess = spawn('git', ['clone', '--depth', '1', '--', cloneUrl, cloneDir], {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: gitEnvironment
@@ -503,7 +544,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    * run's gateway writer, which remaps, sequences and buffers every event
    * and forwards it — as a JSON string, the way it reaches a websocket — to
    * each connection watching the run, this one included. The route's own
-   * events (status, session-id, GitHub results, done) are objects.
+   * events (status, session-id, forge results, done) are objects.
    */
   class SSEStreamWriter {
     constructor(res) {
@@ -607,24 +648,31 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    * POST /api/agent
    *
    * Trigger an AI agent to work on a project.
-   * Supports automatic GitHub branch and pull request creation after successful completion.
+   * Supports automatic branch and pull request creation on GitHub or Forgejo after successful completion.
    *
    * ================================================================================================
    * REQUEST BODY PARAMETERS
    * ================================================================================================
    *
-   * @param {string} githubUrl - (Conditionally Required) GitHub repository URL to clone.
-   *                             Supported formats:
-   *                             - HTTPS: https://github.com/owner/repo
-   *                             - HTTPS with .git: https://github.com/owner/repo.git
-   *                             - SSH: git@github.com:owner/repo
-   *                             - SSH with .git: git@github.com:owner/repo.git
+   * @param {string} repositoryUrl - (Conditionally Required) GitHub or Forgejo repository URL to clone.
+   *                             Aliases: `githubUrl` (the original name), `forgejoUrl`.
+   *                             Cloning requires an https URL without credentials:
+   *                             - GitHub: https://github.com/owner/repo(.git)
+   *                             - Forgejo: https://codeberg.org/owner/repo(.git), https://git.example.com/owner/repo
+   *                             The forge is detected from the host (see `forge`).
+   *
+   * @param {string} forge - (Optional) 'github' | 'forgejo'. Overrides detection. Omitted: github.com is
+   *                         GitHub; codeberg.org and any instance you stored a Forgejo token for are Forgejo;
+   *                         any other host is asked for Forgejo's version endpoint, except localhost and
+   *                         private IP addresses, which are never probed. A host that is neither cannot be
+   *                         cloned, or receive a branch/PR. An override must match the host: 'github' only
+   *                         for github.com, 'forgejo' never for it.
    *
    * @param {string} projectPath - (Conditionally Required) Path to existing project OR destination for cloning.
    *                               Behavior depends on usage:
    *                               - If used alone: Must point to existing project directory
-   *                               - If used with githubUrl: Target location for cloning
-   *                               - If omitted with githubUrl: Auto-generates temporary path in ~/.claude/external-projects/
+   *                               - If used with repositoryUrl: Target location for cloning
+   *                               - If omitted with repositoryUrl: Auto-generates temporary path in ~/.claude/external-projects/
    *
    * @param {string} message - (Required) Task description for the AI agent. Used as:
    *                          - Instructions for the agent
@@ -664,10 +712,10 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    * @param {boolean} cleanup - (Optional) Auto-cleanup project directory after completion.
    *                           Default: true
    *                           Behavior:
-   *                           - Only applies when cloning via githubUrl (not for existing projectPath)
+   *                           - Only applies when cloning via repositoryUrl (not for existing projectPath)
    *                           - Deletes cloned repository after 5 seconds
    *                           - Also deletes associated Claude session directory
-   *                           - Remote branch and PR remain on GitHub if created
+   *                           - Remote branch and PR remain on the forge if created
    *
    * @param {string} githubToken - (Optional) GitHub Personal Access Token for authentication.
    *                              Overrides stored token from user settings.
@@ -675,6 +723,10 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *                              - Private repositories
    *                              - Branch/PR creation features
    *                              Token must have 'repo' scope for full functionality.
+   *
+   * @param {string} forgejoToken - (Optional) Forgejo access token, the Forgejo counterpart of githubToken.
+   *                              Overrides the token stored in settings for the repository's instance.
+   *                              Needs the 'write:repository' scope for branch/PR creation.
    *
    * @param {string} branchName - (Optional) Custom name for the Git branch.
    *                             If provided, createBranch is automatically set to true.
@@ -698,23 +750,23 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *                                - If branch exists locally: Checks out existing branch (no error)
    *                                - If branch exists on remote: Uses existing branch (no error)
    *                                - Branch name: Custom (if branchName provided) or auto-generated from message
-   *                                - Requires either githubUrl OR projectPath with GitHub remote
+   *                                - Requires either repositoryUrl OR projectPath with a GitHub or Forgejo remote
    *
-   * @param {boolean} createPR - (Optional) Create a GitHub Pull Request after successful completion.
+   * @param {boolean} createPR - (Optional) Create a GitHub or Forgejo Pull Request after successful completion.
    *                            Default: false
    *                            Behavior:
    *                            - PR title: First commit message (or fallback to message parameter)
    *                            - PR description: Auto-generated from all commit messages
    *                            - Base branch: Always 'main' (currently hardcoded)
-   *                            - If PR already exists: GitHub returns error with details
-   *                            - Requires either githubUrl OR projectPath with GitHub remote
+   *                            - If PR already exists: the forge returns an error with details
+   *                            - Requires either repositoryUrl OR projectPath with a GitHub or Forgejo remote
    *
    * ================================================================================================
    * PATH HANDLING BEHAVIOR
    * ================================================================================================
    *
-   * Scenario 1: Only githubUrl provided
-   *   Input:  { githubUrl: "https://github.com/owner/repo" }
+   * Scenario 1: Only repositoryUrl provided
+   *   Input:  { repositoryUrl: "https://github.com/owner/repo" }
    *   Action: Clones to auto-generated temporary path: ~/.claude/external-projects/<hash>/
    *   Cleanup: Yes (if cleanup=true)
    *
@@ -724,35 +776,36 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *   Validation: Path must exist and be accessible
    *   Cleanup: No (never cleanup existing projects)
    *
-   * Scenario 3: Both githubUrl and projectPath provided
-   *   Input:  { githubUrl: "https://github.com/owner/repo", projectPath: "/custom/path" }
-   *   Action: Clones githubUrl to projectPath location
+   * Scenario 3: Both repositoryUrl and projectPath provided
+   *   Input:  { repositoryUrl: "https://codeberg.org/owner/repo", projectPath: "/custom/path" }
+   *   Action: Clones repositoryUrl to projectPath location
    *   Validation:
    *     - If projectPath exists with git repo:
-   *       - Compares remote URL with githubUrl
+   *       - Compares remote URL with repositoryUrl
    *       - If URLs match: Reuses existing repo
    *       - If URLs differ: Returns error
    *   Cleanup: Yes (if cleanup=true)
    *
    * ================================================================================================
-   * GITHUB BRANCH/PR CREATION REQUIREMENTS
+   * BRANCH/PR CREATION REQUIREMENTS (GITHUB AND FORGEJO)
    * ================================================================================================
    *
    * For createBranch or createPR to work, one of the following must be true:
    *
-   * Option A: githubUrl provided
+   * Option A: repositoryUrl provided
    *   - Repository URL directly specified
    *   - Works with both cloning and existing paths
    *
-   * Option B: projectPath with GitHub remote
+   * Option B: projectPath with a GitHub or Forgejo remote
    *   - Project must be a Git repository
-   *   - Must have 'origin' remote configured
-   *   - Remote URL must point to github.com
-   *   - System auto-detects GitHub URL via: git remote get-url origin
+   *   - Must have 'origin' remote configured (https or ssh)
+   *   - Remote URL must point to github.com or a Forgejo instance (see `forge`)
+   *   - System auto-detects the forge via: git config --get remote.origin.url
    *
    * Additional Requirements:
-   *   - Valid GitHub token (from settings or githubToken parameter)
-   *   - Token must have 'repo' scope for private repos
+   *   - Valid token for that forge: GitHub (settings or githubToken), or Forgejo
+   *     (a token stored for that instance in settings, or forgejoToken)
+   *   - Token must have 'repo' (GitHub) / 'write:repository' (Forgejo) scope
    *   - Project must have commits (for PR creation)
    *
    * ================================================================================================
@@ -760,17 +813,18 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    * ================================================================================================
    *
    * Input Validations (400 Bad Request):
-   *   - Either githubUrl OR projectPath must be provided (not neither)
+   *   - Either repositoryUrl (or githubUrl/forgejoUrl) OR projectPath must be provided (not neither)
    *   - message must be non-empty string
    *   - provider must be 'claude', 'cursor', 'codex', or 'opencode'
-   *   - createBranch/createPR requires githubUrl OR projectPath (not neither)
+   *   - forge, if given, must be 'github' or 'forgejo'
+   *   - createBranch/createPR requires repositoryUrl OR projectPath (not neither)
    *   - branchName must pass Git naming rules (if provided)
    *
    * Runtime Validations (500 Internal Server Error or specific error in response):
    *   - projectPath must exist (if used alone)
-   *   - GitHub URL format must be valid
-   *   - Git remote URL must include github.com (for projectPath + branch/PR)
-   *   - GitHub token must be available (for private repos and branch/PR)
+   *   - Repository URL must be https, carry no credentials, and be on GitHub or Forgejo
+   *   - Git remote must be a GitHub or Forgejo repository (for projectPath + branch/PR)
+   *   - A token for that forge must be available (for private repos and branch/PR)
    *   - Directory conflicts handled (existing path with different repo)
    *
    * Branch Name Validation Errors (returned in response, not HTTP error):
@@ -799,9 +853,9 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *     - { kind: "text" | "tool_use" | ... , sessionId, seq, ... }   // the provider's normalized events
    *     - { kind: "complete", ... }
    *     - { type: "status", message: "Run aborted", aborted: true }   // only when a tab aborted the run; no branch/PR follows
-   *     - { type: "github-branch", branch: { name: "...", url: "..." } }
-   *     - { type: "github-pr", pullRequest: { number: 42, url: "..." } }
-   *     - { type: "github-error", error: "..." }
+   *     - { type: "github-branch" | "forgejo-branch", forge, branch: { name: "...", url: "..." } }
+   *     - { type: "github-pr" | "forgejo-pr", forge, pullRequest: { number: 42, url: "..." } }
+   *     - { type: "github-error" | "forgejo-error", forge, error: "..." }
    *     - { type: "done" }
    *
    * Non-Streaming Response (stream=false):
@@ -821,11 +875,11 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *     projectPath: "/path/to/project",
    *     branch: {               // Only if createBranch=true
    *       name: "feature/xyz",
-   *       url: "https://github.com/owner/repo/tree/feature/xyz"
+   *       url: "https://github.com/owner/repo/tree/feature/xyz"   // Forgejo: .../src/branch/feature/xyz
    *     } | { error: "..." },
    *     pullRequest: {          // Only if createPR=true
    *       number: 42,
-   *       url: "https://github.com/owner/repo/pull/42"
+   *       url: "https://github.com/owner/repo/pull/42"   // Forgejo: .../pulls/42
    *     } | { error: "..." }
    *   }
    *
@@ -840,7 +894,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *
    * Example 1: Clone and process with auto-cleanup
    *   POST /api/agent
-   *   { "githubUrl": "https://github.com/user/repo", "message": "Fix bug" }
+   *   { "repositoryUrl": "https://github.com/user/repo", "message": "Fix bug" }
    *
    * Example 2: Use existing project with custom branch and PR
    *   POST /api/agent
@@ -851,10 +905,10 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *     "createPR": true
    *   }
    *
-   * Example 3: Clone to specific path with auto-generated branch
+   * Example 3: Clone a Forgejo repository to a specific path with auto-generated branch
    *   POST /api/agent
    *   {
-   *     "githubUrl": "https://github.com/user/repo",
+   *     "repositoryUrl": "https://codeberg.org/user/repo",
    *     "projectPath": "/tmp/work",
    *     "message": "Refactor code",
    *     "createBranch": true,
@@ -862,7 +916,17 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *   }
    */
   router.post('/', validateExternalApiKey, async (req, res) => {
-    const { githubUrl, projectPath, message, model, githubToken, branchName } = req.body;
+    const { projectPath, message, model, githubToken, forgejoToken, branchName } = req.body;
+    // `repositoryUrl` names a GitHub or Forgejo repository; `githubUrl` and
+    // `forgejoUrl` are accepted as aliases (`githubUrl` predates Forgejo).
+    const repositoryUrl = [req.body.repositoryUrl, req.body.githubUrl, req.body.forgejoUrl]
+      .find((value) => typeof value === 'string' && value.trim())?.trim() ?? null;
+    if (req.body.forge !== undefined && req.body.forge !== null && !AGENT_FORGES.includes(req.body.forge)) {
+      return res.status(400).json({ error: 'forge must be "github" or "forgejo"' });
+    }
+    // Omitted: detected from the URL (github.com, a Forgejo instance the user
+    // stored a token for, or one that answers Forgejo's version endpoint).
+    const requestedForge = req.body.forge ?? null;
     // Transport input is typed here, before anything binds it to a query:
     // the lookup below runs outside the try, where a throw would be an
     // unhandled rejection.
@@ -884,8 +948,8 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
     const createPR = req.body.createPR === true || req.body.createPR === 'true';
 
     // Validate inputs
-    if (!githubUrl && !projectPath) {
-      return res.status(400).json({ error: 'Either githubUrl or projectPath is required' });
+    if (!repositoryUrl && !projectPath) {
+      return res.status(400).json({ error: 'Either repositoryUrl (or githubUrl) or projectPath is required' });
     }
 
     if (!message || !message.trim()) {
@@ -896,10 +960,10 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       return res.status(400).json({ error: 'provider must be "claude", "cursor", "codex", or "opencode"' });
     }
 
-    // Validate GitHub branch/PR creation requirements
-    // Allow branch/PR creation with projectPath as long as it has a GitHub remote
-    if ((createBranch || createPR) && !githubUrl && !projectPath) {
-      return res.status(400).json({ error: 'createBranch and createPR require either githubUrl or projectPath with a GitHub remote' });
+    // Validate branch/PR creation requirements
+    // Allow branch/PR creation with projectPath as long as it has a GitHub or Forgejo remote
+    if ((createBranch || createPR) && !repositoryUrl && !projectPath) {
+      return res.status(400).json({ error: 'createBranch and createPR require either repositoryUrl or projectPath with a GitHub or Forgejo remote' });
     }
 
     // A run continues a session the caller names, by its app id or — for a
@@ -933,20 +997,26 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
 
     try {
       // Determine the final project path
-      if (githubUrl) {
+      if (repositoryUrl) {
         // Clone repository (to projectPath if provided, otherwise generate path)
-        const tokenToUse = githubToken || githubTokensDb.getActiveGithubToken(req.user.id);
+        const cloneTarget = await resolveCloneTarget(repositoryUrl, requestedForge, req.user.id);
+        const tokenToUse = resolveForgeToken(
+          cloneTarget.forge,
+          cloneTarget.instanceUrl,
+          { githubToken, forgejoToken },
+          req.user.id,
+        );
 
         let targetPath;
         if (projectPath) {
           targetPath = projectPath;
         } else {
           // Generate a unique path for cloning
-          const repoHash = crypto.createHash('md5').update(githubUrl + Date.now()).digest('hex');
+          const repoHash = crypto.createHash('md5').update(repositoryUrl + Date.now()).digest('hex');
           targetPath = path.join(os.homedir(), '.claude', 'external-projects', repoHash);
         }
 
-        const clonedProject = await cloneGitHubRepo(githubUrl.trim(), tokenToUse, targetPath);
+        const clonedProject = await cloneRepository(cloneTarget, tokenToUse, targetPath);
         finalProjectPath = clonedProject.path;
         clonedProjectCreated = clonedProject.created;
       } else {
@@ -997,7 +1067,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
         userId: req.user.id,
       });
       if (!run) {
-        if (cleanup && githubUrl && clonedProjectCreated) {
+        if (cleanup && repositoryUrl && clonedProjectCreated) {
           cleanupProject(finalProjectPath, null);
         }
         return res.status(409).json({ error: `Session "${appSessionId}" already has a run in progress` });
@@ -1017,7 +1087,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       // passes back as `sessionId` to continue it.
       writer.send({
         type: 'status',
-        message: githubUrl ? 'Repository cloned and session started' : 'Session started',
+        message: repositoryUrl ? 'Repository cloned and session started' : 'Session started',
         projectPath: finalProjectPath
       });
       writer.send({ type: 'session-id', sessionId: appSessionId });
@@ -1092,42 +1162,49 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
         writer.send({ type: 'status', message: 'Run aborted', aborted: true });
       }
 
-      // Handle GitHub branch and PR creation after successful agent completion
+      // Handle branch and PR creation (GitHub or Forgejo) after successful agent completion
       let branchInfo = null;
       let prInfo = null;
 
       if (!aborted && (createBranch || createPR)) {
+        // Known once the remote is resolved; names the stream events
+        // (`github-*` / `forgejo-*`). An error before that reports as the
+        // forge the caller asked for, else GitHub, as it always did.
+        let forge = null;
         try {
-          console.log('🔄 Starting GitHub branch/PR creation workflow...');
+          console.log('🔄 Starting branch/PR creation workflow...');
 
-          // Get GitHub token
-          const tokenToUse = githubToken || githubTokensDb.getActiveGithubToken(req.user.id);
-
-          if (!tokenToUse) {
-            throw new Error('GitHub token required for branch/PR creation. Please configure a GitHub token in settings.');
-          }
-
-          // Initialize Octokit
-          const octokit = new Octokit({ auth: tokenToUse });
-
-          // Get GitHub URL - either from parameter or from git remote
-          let repoUrl = githubUrl;
+          // Get the repository URL - either from parameter or from git remote
+          let repoUrl = repositoryUrl;
           if (!repoUrl) {
-            console.log('🔍 Getting GitHub URL from git remote...');
+            console.log('🔍 Getting repository URL from git remote...');
             try {
               repoUrl = await getGitRemoteUrl(finalProjectPath);
-              if (!repoUrl.includes('github.com')) {
-                throw new Error('Project does not have a GitHub remote configured');
-              }
-              console.log(`✅ Found GitHub remote: ${repoUrl}`);
             } catch (error) {
-              throw new Error(`Failed to get GitHub remote URL: ${error.message}`);
+              throw new Error(`Failed to get repository remote URL: ${error.message}`);
             }
           }
 
-          // Parse GitHub URL to get owner and repo
-          const { owner, repo } = parseGitHubUrl(repoUrl);
+          const resolvedRemote = await forgeGateway.resolveRepositoryForge(repoUrl, req.user.id, requestedForge);
+          if (!resolvedRemote?.forge) {
+            throw new Error('Project does not have a GitHub or Forgejo remote configured');
+          }
+          // Before the push: an override naming the wrong forge must not send
+          // the branch to the remote and the pull request somewhere else.
+          assertForgeMatchesHost(resolvedRemote);
+          forge = resolvedRemote.forge;
+          const { repository, instanceUrl } = resolvedRemote;
+          const { owner, repo } = repository;
+          console.log(`✅ Found ${forge} remote: ${repoUrl}`);
           console.log(`📦 Repository: ${owner}/${repo}`);
+
+          // Get the forge token
+          const tokenToUse = resolveForgeToken(forge, instanceUrl, { githubToken, forgejoToken }, req.user.id);
+          if (!tokenToUse) {
+            throw new Error(forge === 'github'
+              ? 'GitHub token required for branch/PR creation. Please configure a GitHub token in settings.'
+              : `Forgejo token required for branch/PR creation. Please add a Forgejo token for ${instanceUrl} in settings.`);
+          }
 
           // Use provided branch name or auto-generate from message
           const finalBranchName = branchName || autogenerateBranchName(message);
@@ -1211,7 +1288,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
 
             branchInfo = {
               name: finalBranchName,
-              url: `https://github.com/${owner}/${repo}/tree/${finalBranchName}`
+              url: getBranchWebUrl(forge, repository, finalBranchName)
             };
           }
 
@@ -1235,33 +1312,51 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
             console.log(`📝 PR Title: ${prTitle}`);
 
             // Create the pull request
-            console.log('🔄 Creating pull request...');
-            prInfo = await createGitHubPR(octokit, owner, repo, finalBranchName, prTitle, prBody, 'main');
+            console.log(`🔄 Creating ${forge} pull request...`);
+            if (forge === 'github') {
+              const octokit = new Octokit({ auth: tokenToUse });
+              prInfo = await createGitHubPR(octokit, owner, repo, finalBranchName, prTitle, prBody, 'main');
+            } else {
+              prInfo = await forgeGateway.createForgejoPullRequest({
+                instanceUrl,
+                repository,
+                token: tokenToUse,
+                head: finalBranchName,
+                base: 'main',
+                title: prTitle,
+                body: prBody,
+              });
+              console.log(`✅ Created pull request #${prInfo.number}: ${prInfo.url}`);
+            }
           }
 
           // Send branch/PR info in response
           if (stream) {
             if (branchInfo) {
               writer.send({
-                type: 'github-branch',
+                type: `${forge}-branch`,
+                forge,
                 branch: branchInfo
               });
             }
             if (prInfo) {
               writer.send({
-                type: 'github-pr',
+                type: `${forge}-pr`,
+                forge,
                 pullRequest: prInfo
               });
             }
           }
 
         } catch (error) {
-          console.error('❌ GitHub branch/PR creation error:', error);
+          console.error('❌ Branch/PR creation error:', error);
+          const reportedForge = forge ?? requestedForge ?? 'github';
 
           // Send error but don't fail the entire request
           if (stream) {
             writer.send({
-              type: 'github-error',
+              type: `${reportedForge}-error`,
+              forge: reportedForge,
               error: error.message
             });
           }
@@ -1306,7 +1401,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       }
 
       // Clean up if requested
-      if (cleanup && githubUrl && clonedProjectCreated) {
+      if (cleanup && repositoryUrl && clonedProjectCreated) {
         // Only cleanup if we cloned a repo (not for existing project paths)
         const sessionIdForCleanup = run.writer.getSessionId();
         setTimeout(() => {
@@ -1318,7 +1413,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       console.error('❌ External session error:', error);
 
       // Clean up on error
-      if (finalProjectPath && cleanup && githubUrl && clonedProjectCreated) {
+      if (finalProjectPath && cleanup && repositoryUrl && clonedProjectCreated) {
         const sessionIdForCleanup = run ? run.writer.getSessionId() : null;
         cleanupProject(finalProjectPath, sessionIdForCleanup);
       }

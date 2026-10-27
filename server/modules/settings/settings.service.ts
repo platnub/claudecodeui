@@ -1,4 +1,8 @@
+import { normalizeForgejoInstanceUrl } from '@/modules/forges/index.js';
 import { AppError } from '@/shared/utils.js';
+
+/** Credential kinds that are only valid on one instance, which must be stored with them. */
+const PER_INSTANCE_CREDENTIAL_TYPES = new Set(['forgejo_token']);
 
 type ApiKeyRow = Record<string, unknown> & { api_key: string };
 type NotificationPreferences = Record<string, unknown> & {
@@ -20,6 +24,7 @@ type SettingsDependencies = {
       type: string,
       value: string,
       description: string | null,
+      serviceUrl: string | null,
     ): unknown;
     remove(userId: number, credentialId: number): boolean;
     toggle(userId: number, credentialId: number, isActive: boolean): boolean;
@@ -105,6 +110,21 @@ export function createSettingsService(dependencies: SettingsDependencies) {
       const description = typeof input.description === 'string'
         ? input.description.trim() || null
         : null;
+      // A Forgejo token is issued by one instance and is only ever sent there,
+      // so the instance is part of the credential. https only: the token would
+      // otherwise travel in the clear.
+      let serviceUrl: string | null = null;
+      if (PER_INSTANCE_CREDENTIAL_TYPES.has(credentialType)) {
+        serviceUrl = normalizeForgejoInstanceUrl(
+          typeof input.serviceUrl === 'string' ? input.serviceUrl : '',
+        );
+        if (!serviceUrl) {
+          throw new AppError('A valid https instance URL is required for this credential', {
+            code: 'CREDENTIAL_SERVICE_URL_INVALID',
+            statusCode: 400,
+          });
+        }
+      }
       return {
         success: true,
         credential: dependencies.credentials.create(
@@ -113,6 +133,7 @@ export function createSettingsService(dependencies: SettingsDependencies) {
           credentialType,
           credentialValue,
           description,
+          serviceUrl,
         ),
       };
     },

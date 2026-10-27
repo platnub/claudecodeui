@@ -349,6 +349,24 @@
       "added": "Added:",
       "confirmDelete": "Are you sure you want to delete this GitHub token?"
     },
+    "forgejo": {
+      "title": "Forgejo Tokens",
+      "description": "Add Forgejo access tokens to clone private repositories and open pull requests via the external API.",
+      "descriptionAlt": "Add Forgejo access tokens (Codeberg or your own instance) to clone private repositories and open pull requests. Each token belongs to one instance. You can also pass a token directly in API requests as forgejoToken.",
+      "addButton": "Add Token",
+      "form": {
+        "namePlaceholder": "Token Name (e.g., Codeberg)",
+        "instanceUrlPlaceholder": "Instance URL (e.g., https://codeberg.org)",
+        "tokenPlaceholder": "Forgejo access token",
+        "descriptionPlaceholder": "Description (optional)",
+        "addButton": "Add Token",
+        "cancelButton": "Cancel",
+        "howToCreate": "How to create a Forgejo access token →"
+      },
+      "empty": "No Forgejo tokens added yet.",
+      "added": "Added:",
+      "confirmDelete": "Are you sure you want to delete this Forgejo token?"
+    },
     "apiDocsLink": "API Documentation",
     "documentation": {
       "title": "External API Documentation",

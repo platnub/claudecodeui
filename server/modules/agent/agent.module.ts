@@ -7,11 +7,13 @@ import spawn from 'cross-spawn';
 
 import {
   apiKeysDb,
+  forgejoTokensDb,
   githubTokensDb,
   projectsDb,
   sessionsDb,
   userDb,
 } from '@/modules/database/index.js';
+import { createForgejoPullRequest, resolveRepositoryForge } from '@/modules/forges/index.js';
 import { providerModelsService, sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
@@ -43,6 +45,13 @@ export function createAgentModule(externalDependencies: AgentExternalDependencie
     },
     githubTokens: {
       getActiveGithubToken: (userId) => githubTokensDb.getActiveGithubToken(userId),
+    },
+    forgejoTokens: {
+      getActiveForgejoToken: (userId, instanceUrl) => forgejoTokensDb.getActiveForgejoToken(userId, instanceUrl),
+    },
+    forges: {
+      resolveRepositoryForge,
+      createForgejoPullRequest: (input) => createForgejoPullRequest(input),
     },
     projects: {
       createProjectPath: (projectPath, customName) =>

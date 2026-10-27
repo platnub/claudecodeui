@@ -1,46 +1,69 @@
 import { useTranslation } from 'react-i18next';
 
 import { useCredentialsSettings } from '@/modules/settings/hooks/useCredentialsSettings';
+import { useForgeCredentials } from '@/modules/settings/hooks/useForgeCredentials';
 import ApiKeysSection from '@/modules/settings/tabs/api-settings/sections/ApiKeysSection';
-import GithubCredentialsSection from '@/modules/settings/tabs/api-settings/sections/GithubCredentialsSection';
+import ForgeCredentialsSection from '@/modules/settings/tabs/api-settings/sections/ForgeCredentialsSection';
 import NewApiKeyAlert from '@/modules/settings/tabs/api-settings/sections/NewApiKeyAlert';
+import type { GitForge } from '@/shared/types';
 
-/** Rendered by Settings for the "api" tab, managing CloudCLI API keys and GitHub credentials. */
+type ForgeCredentialsPanelProps = {
+  forge: GitForge;
+};
+
+/** One forge's token section, wired to its own credential state. */
+function ForgeCredentialsPanel({ forge }: ForgeCredentialsPanelProps) {
+  const { t } = useTranslation('settings');
+  const forgeCredentials = useForgeCredentials({
+    forge,
+    confirmDeleteText: t(`apiKeys.${forge}.confirmDelete`),
+  });
+
+  return (
+    <ForgeCredentialsSection
+      forge={forge}
+      credentials={forgeCredentials.credentials}
+      showNewForm={forgeCredentials.showNewForm}
+      showNewTokenPlainText={forgeCredentials.showNewTokenPlainText}
+      newName={forgeCredentials.newName}
+      newToken={forgeCredentials.newToken}
+      newDescription={forgeCredentials.newDescription}
+      newInstanceUrl={forgeCredentials.newInstanceUrl}
+      formError={forgeCredentials.formError}
+      onShowNewFormChange={forgeCredentials.setShowNewForm}
+      onNewNameChange={forgeCredentials.setNewName}
+      onNewTokenChange={forgeCredentials.setNewToken}
+      onNewDescriptionChange={forgeCredentials.setNewDescription}
+      onNewInstanceUrlChange={forgeCredentials.setNewInstanceUrl}
+      onToggleNewTokenVisibility={forgeCredentials.toggleNewTokenVisibility}
+      onCreateCredential={forgeCredentials.createCredential}
+      onCancelCreateCredential={forgeCredentials.cancelNewForm}
+      onToggleCredential={forgeCredentials.toggleCredential}
+      onDeleteCredential={forgeCredentials.deleteCredential}
+    />
+  );
+}
+
+/** Rendered by Settings for the "api" tab, managing CloudCLI API keys and GitHub / Forgejo credentials. */
 export default function CredentialsSettingsTab() {
   const { t } = useTranslation('settings');
   const {
     apiKeys,
-    githubCredentials,
     loading,
     showNewKeyForm,
     setShowNewKeyForm,
     newKeyName,
     setNewKeyName,
-    showNewGithubForm,
-    setShowNewGithubForm,
-    newGithubName,
-    setNewGithubName,
-    newGithubToken,
-    setNewGithubToken,
-    newGithubDescription,
-    setNewGithubDescription,
-    showToken,
     copiedKey,
     newlyCreatedKey,
     createApiKey,
     deleteApiKey,
     toggleApiKey,
-    createGithubCredential,
-    deleteGithubCredential,
-    toggleGithubCredential,
     copyToClipboard,
     dismissNewlyCreatedKey,
     cancelNewApiKeyForm,
-    cancelNewGithubForm,
-    toggleNewGithubTokenVisibility,
   } = useCredentialsSettings({
     confirmDeleteApiKeyText: t('apiKeys.confirmDelete'),
-    confirmDeleteGithubCredentialText: t('apiKeys.github.confirmDelete'),
   });
 
   if (loading) {
@@ -70,24 +93,9 @@ export default function CredentialsSettingsTab() {
         onDeleteApiKey={deleteApiKey}
       />
 
-      <GithubCredentialsSection
-        githubCredentials={githubCredentials}
-        showNewGithubForm={showNewGithubForm}
-        showNewTokenPlainText={Boolean(showToken.new)}
-        newGithubName={newGithubName}
-        newGithubToken={newGithubToken}
-        newGithubDescription={newGithubDescription}
-        onShowNewGithubFormChange={setShowNewGithubForm}
-        onNewGithubNameChange={setNewGithubName}
-        onNewGithubTokenChange={setNewGithubToken}
-        onNewGithubDescriptionChange={setNewGithubDescription}
-        onToggleNewTokenVisibility={toggleNewGithubTokenVisibility}
-        onCreateGithubCredential={createGithubCredential}
-        onCancelCreateGithubCredential={cancelNewGithubForm}
-        onToggleGithubCredential={toggleGithubCredential}
-        onDeleteGithubCredential={deleteGithubCredential}
-      />
+      <ForgeCredentialsPanel forge="github" />
 
+      <ForgeCredentialsPanel forge="forgejo" />
     </div>
   );
 }

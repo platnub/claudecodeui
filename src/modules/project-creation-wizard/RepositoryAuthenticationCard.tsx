@@ -2,18 +2,40 @@ import { Key, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Input } from '@/shared/ui';
-import type { GithubTokenCredential, TokenMode } from '@/shared/types';
+import type { ForgeTokenCredential, GitForge, TokenMode } from '@/shared/types';
 
-type GithubAuthenticationCardProps = {
+type RepositoryAuthenticationCardProps = {
+  forge: GitForge;
   tokenMode: TokenMode;
-  selectedGithubToken: string;
-  newGithubToken: string;
-  availableTokens: GithubTokenCredential[];
+  selectedToken: string;
+  newToken: string;
+  availableTokens: ForgeTokenCredential[];
   loadingTokens: boolean;
   tokenLoadError: string | null;
   onTokenModeChange: (tokenMode: TokenMode) => void;
-  onSelectedGithubTokenChange: (tokenId: string) => void;
-  onNewGithubTokenChange: (tokenValue: string) => void;
+  onSelectedTokenChange: (tokenId: string) => void;
+  onNewTokenChange: (tokenValue: string) => void;
+};
+
+/** The translation keys and token placeholder that differ between forges. */
+const FORGE_COPY: Record<GitForge, {
+  titleKey: string;
+  optionalTokenKey: string;
+  tokenPlaceholder: string;
+  publicTokenPlaceholderKey: string;
+}> = {
+  github: {
+    titleKey: 'projectWizard.step2.githubAuth',
+    optionalTokenKey: 'projectWizard.step2.optionalTokenPublic',
+    tokenPlaceholder: 'ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+    publicTokenPlaceholderKey: 'projectWizard.step2.tokenPublicPlaceholder',
+  },
+  forgejo: {
+    titleKey: 'projectWizard.step2.forgejoAuth',
+    optionalTokenKey: 'projectWizard.step2.optionalTokenPublicForgejo',
+    tokenPlaceholder: 'Forgejo access token',
+    publicTokenPlaceholderKey: 'projectWizard.step2.tokenPublicPlaceholderForgejo',
+  },
 };
 
 const getModeClassName = (mode: TokenMode, selectedMode: TokenMode) =>
@@ -25,19 +47,21 @@ const getModeClassName = (mode: TokenMode, selectedMode: TokenMode) =>
       : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
   }`;
 
-/** Rendered by StepConfiguration to choose the GitHub token used when cloning a repository. */
-export default function GithubAuthenticationCard({
+/** Rendered by StepConfiguration to choose the GitHub or Forgejo token used when cloning a repository. */
+export default function RepositoryAuthenticationCard({
+  forge,
   tokenMode,
-  selectedGithubToken,
-  newGithubToken,
+  selectedToken,
+  newToken,
   availableTokens,
   loadingTokens,
   tokenLoadError,
   onTokenModeChange,
-  onSelectedGithubTokenChange,
-  onNewGithubTokenChange,
-}: GithubAuthenticationCardProps) {
+  onSelectedTokenChange,
+  onNewTokenChange,
+}: RepositoryAuthenticationCardProps) {
   const { t } = useTranslation();
+  const copy = FORGE_COPY[forge];
 
   return (
     <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/50">
@@ -45,7 +69,7 @@ export default function GithubAuthenticationCard({
         <Key className="mt-0.5 h-5 w-5 flex-shrink-0 text-gray-600 dark:text-gray-400" />
         <div className="flex-1">
           <h5 className="mb-1 font-medium text-gray-900 dark:text-white">
-            {t('projectWizard.step2.githubAuth')}
+            {t(copy.titleKey)}
           </h5>
           <p className="text-sm text-gray-600 dark:text-gray-400">
             {t('projectWizard.step2.githubAuthHelp')}
@@ -82,8 +106,8 @@ export default function GithubAuthenticationCard({
             <button
               onClick={() => {
                 onTokenModeChange('none');
-                onSelectedGithubTokenChange('');
-                onNewGithubTokenChange('');
+                onSelectedTokenChange('');
+                onNewTokenChange('');
               }}
               className={getModeClassName(tokenMode, 'none')}
             >
@@ -97,8 +121,8 @@ export default function GithubAuthenticationCard({
                 {t('projectWizard.step2.selectToken')}
               </label>
               <select
-                value={selectedGithubToken}
-                onChange={(event) => onSelectedGithubTokenChange(event.target.value)}
+                value={selectedToken}
+                onChange={(event) => onSelectedTokenChange(event.target.value)}
                 className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800"
               >
                 <option value="">{t('projectWizard.step2.selectTokenPlaceholder')}</option>
@@ -116,9 +140,9 @@ export default function GithubAuthenticationCard({
               </label>
               <Input
                 type="password"
-                value={newGithubToken}
-                onChange={(event) => onNewGithubTokenChange(event.target.value)}
-                placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                value={newToken}
+                onChange={(event) => onNewTokenChange(event.target.value)}
+                placeholder={copy.tokenPlaceholder}
                 className="w-full"
               />
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -139,17 +163,17 @@ export default function GithubAuthenticationCard({
 
           <div>
             <label className="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
-              {t('projectWizard.step2.optionalTokenPublic')}
+              {t(copy.optionalTokenKey)}
             </label>
             <Input
               type="password"
-              value={newGithubToken}
+              value={newToken}
               onChange={(event) => {
                 const tokenValue = event.target.value;
-                onNewGithubTokenChange(tokenValue);
+                onNewTokenChange(tokenValue);
                 onTokenModeChange(tokenValue.trim() ? 'new' : 'none');
               }}
-              placeholder={t('projectWizard.step2.tokenPublicPlaceholder')}
+              placeholder={t(copy.publicTokenPlaceholderKey)}
               className="w-full"
             />
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">

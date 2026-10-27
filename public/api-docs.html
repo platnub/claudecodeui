@@ -435,7 +435,7 @@
         <nav class="sidebar">
             <div class="sidebar-title">Getting Started</div>
             <a href="#authentication">Authentication</a>
-            <a href="#credentials">GitHub Credentials</a>
+            <a href="#credentials">GitHub &amp; Forgejo Credentials</a>
 
             <div class="sidebar-title">API Reference</div>
             <a href="#agent">Agent</a>
@@ -449,7 +449,7 @@
             <div class="section-row">
                 <div class="docs-section">
                     <div class="intro">
-                        <p><strong>Programmatically trigger AI agents to work on projects.</strong> Clone GitHub repositories or use existing project paths. Perfect for CI/CD pipelines, automated code reviews, and bulk processing.</p>
+                        <p><strong>Programmatically trigger AI agents to work on projects.</strong> Clone GitHub or Forgejo repositories or use existing project paths. Perfect for CI/CD pipelines, automated code reviews, and bulk processing.</p>
                     </div>
 
                     <section id="authentication">
@@ -460,11 +460,12 @@
                     </section>
 
                     <section id="credentials">
-                        <h3>GitHub Credentials</h3>
-                        <p>For private repositories, store a GitHub token in settings or pass it with each request.</p>
+                        <h3>GitHub &amp; Forgejo Credentials</h3>
+                        <p>For private repositories and for branch/PR creation, store a token in Settings → API &amp; Tokens or pass it with each request: <code>githubToken</code> for GitHub, <code>forgejoToken</code> for Forgejo.</p>
+                        <p>A Forgejo token belongs to one instance (for example <code>https://codeberg.org</code>), so it is stored together with that instance's URL and only ever sent to it, over https.</p>
 
                         <div class="note">
-                            <strong>Note:</strong> GitHub tokens in the request override stored tokens.
+                            <strong>Note:</strong> Tokens in the request override stored tokens. The repository host is detected automatically: <code>github.com</code> is GitHub; <code>codeberg.org</code>, any instance you stored a Forgejo token for, and any host that answers Forgejo's version API are Forgejo. <code>localhost</code> and private IP addresses are never probed. Pass <code>forge</code> to override detection (it must match the host: <code>github</code> only for github.com, <code>forgejo</code> never for it). Links to a page of a repository (<code>.../tree/main</code>, <code>.../src/branch/main</code>) are refused; use the repository URL.
                         </div>
                     </section>
                 </div>
@@ -503,16 +504,22 @@
                                 </thead>
                                 <tbody>
                                     <tr>
-                                        <td><code>githubUrl</code></td>
+                                        <td><code>repositoryUrl</code></td>
                                         <td>string</td>
                                         <td><span class="badge badge-optional">Conditional</span></td>
-                                        <td>GitHub repository URL to clone. If path exists with same repo, reuses it. If path exists with different repo, returns error.</td>
+                                        <td>GitHub or Forgejo repository URL (https) to clone. <code>githubUrl</code> and <code>forgejoUrl</code> are accepted as aliases. If path exists with same repo, reuses it. If path exists with different repo, returns error.</td>
+                                    </tr>
+                                    <tr>
+                                        <td><code>forge</code></td>
+                                        <td>string</td>
+                                        <td><span class="badge badge-optional">Optional</span></td>
+                                        <td><code>github</code> or <code>forgejo</code>. Overrides automatic host detection for cloning and branch/PR creation.</td>
                                     </tr>
                                     <tr>
                                         <td><code>projectPath</code></td>
                                         <td>string</td>
                                         <td><span class="badge badge-optional">Conditional</span></td>
-                                        <td>Path to existing project OR destination for cloning. If omitted with <code>githubUrl</code>, auto-generates path. If used alone, must point to existing project directory.</td>
+                                        <td>Path to existing project OR destination for cloning. If omitted with <code>repositoryUrl</code>, auto-generates path. If used alone, must point to existing project directory.</td>
                                     </tr>
                                     <tr>
                                         <td><code>message</code></td>
@@ -550,41 +557,47 @@
                                         <td><code>cleanup</code></td>
                                         <td>boolean</td>
                                         <td><span class="badge badge-optional">Optional</span></td>
-                                        <td>Auto-cleanup after completion (default: <code>true</code>). Only applies when cloning via <code>githubUrl</code>. Existing projects specified via <code>projectPath</code> are never cleaned up.</td>
+                                        <td>Auto-cleanup after completion (default: <code>true</code>). Only applies when cloning via <code>repositoryUrl</code>. Existing projects specified via <code>projectPath</code> are never cleaned up.</td>
                                     </tr>
                                     <tr>
                                         <td><code>githubToken</code></td>
                                         <td>string</td>
                                         <td><span class="badge badge-optional">Optional</span></td>
-                                        <td>GitHub token for private repos</td>
+                                        <td>GitHub token for private repos and GitHub branch/PR creation</td>
+                                    </tr>
+                                    <tr>
+                                        <td><code>forgejoToken</code></td>
+                                        <td>string</td>
+                                        <td><span class="badge badge-optional">Optional</span></td>
+                                        <td>Forgejo access token for private repos and Forgejo branch/PR creation (needs the <code>write:repository</code> scope for PRs). Overrides the token stored for the repository's instance.</td>
                                     </tr>
                                     <tr>
                                         <td><code>branchName</code></td>
                                         <td>string</td>
                                         <td><span class="badge badge-optional">Optional</span></td>
-                                        <td>Custom branch name to use. If provided, <code>createBranch</code> is automatically enabled. Branch names are validated against Git naming rules. Works with <code>githubUrl</code> or <code>projectPath</code> (if it has a GitHub remote).</td>
+                                        <td>Custom branch name to use. If provided, <code>createBranch</code> is automatically enabled. Branch names are validated against Git naming rules. Works with <code>repositoryUrl</code> or <code>projectPath</code> (if it has a GitHub or Forgejo remote).</td>
                                     </tr>
                                     <tr>
                                         <td><code>createBranch</code></td>
                                         <td>boolean</td>
                                         <td><span class="badge badge-optional">Optional</span></td>
-                                        <td>Create a new branch after successful completion (default: <code>false</code>). Automatically set to <code>true</code> if <code>branchName</code> is provided. Works with <code>githubUrl</code> or <code>projectPath</code> (if it has a GitHub remote).</td>
+                                        <td>Create a new branch after successful completion (default: <code>false</code>). Automatically set to <code>true</code> if <code>branchName</code> is provided. Works with <code>repositoryUrl</code> or <code>projectPath</code> (if it has a GitHub or Forgejo remote).</td>
                                     </tr>
                                     <tr>
                                         <td><code>createPR</code></td>
                                         <td>boolean</td>
                                         <td><span class="badge badge-optional">Optional</span></td>
-                                        <td>Create a pull request after successful completion (default: <code>false</code>). PR title and description auto-generated from commit messages. Works with <code>githubUrl</code> or <code>projectPath</code> (if it has a GitHub remote).</td>
+                                        <td>Create a pull request after successful completion (default: <code>false</code>). PR title and description auto-generated from commit messages. Works with <code>repositoryUrl</code> or <code>projectPath</code> (if it has a GitHub or Forgejo remote).</td>
                                     </tr>
                                 </tbody>
                             </table>
 
                             <div class="note">
                                 <strong>Path Handling Behavior:</strong><br><br>
-                                <strong>Scenario 1:</strong> Only <code>githubUrl</code> → Clones to auto-generated temporary path<br>
+                                <strong>Scenario 1:</strong> Only <code>repositoryUrl</code> → Clones to auto-generated temporary path<br>
                                 <strong>Scenario 2:</strong> Only <code>projectPath</code> → Uses existing project at specified path<br>
-                                <strong>Scenario 3:</strong> Both provided → Clones <code>githubUrl</code> to <code>projectPath</code><br><br>
-                                <strong>Validation:</strong> If <code>projectPath</code> exists and contains a git repository, the remote URL is compared with <code>githubUrl</code>. If URLs match, the existing repo is reused. If URLs differ, an error is returned.
+                                <strong>Scenario 3:</strong> Both provided → Clones <code>repositoryUrl</code> to <code>projectPath</code><br><br>
+                                <strong>Validation:</strong> If <code>projectPath</code> exists and contains a git repository, the remote URL is compared with <code>repositoryUrl</code>. If URLs match, the existing repo is reused. If URLs differ, an error is returned.
                             </div>
 
                             <h4>Response (Streaming)</h4>
@@ -613,7 +626,7 @@
   -H "Content-Type: application/json" \
   -H "X-API-Key: ck_..." \
   -d '{
-    "githubUrl": "https://github.com/user/repo",
+    "repositoryUrl": "https://github.com/user/repo",
     "message": "Add error handling to main.js"
   }'</code></pre>
                         </div>
@@ -626,7 +639,7 @@
     'X-API-Key': process.env.CLAUDE_API_KEY
   },
   body: JSON.stringify({
-    githubUrl: 'https://github.com/user/repo',
+    repositoryUrl: 'https://github.com/user/repo',
     message: 'Add error handling',
     stream: false
   })
@@ -646,7 +659,7 @@ response = requests.post(
         'X-API-Key': os.environ['CLAUDE_API_KEY']
     },
     json={
-        'githubUrl': 'https://github.com/user/repo',
+        'repositoryUrl': 'https://github.com/user/repo',
         'message': 'Add error handling',
         'stream': False
     }
@@ -736,7 +749,7 @@ data: {"type":"done"}</code></pre>
                         <p>Integrate with GitHub Actions or other CI/CD pipelines.</p>
 
                         <h3>Create Branch and Pull Request</h3>
-                        <p>Automatically create a new branch and pull request after the agent completes its work. Branch names are auto-generated from the message, and PR title/description are auto-generated from commit messages.</p>
+                        <p>Automatically create a new branch and pull request after the agent completes its work, on GitHub or Forgejo. Branch names are auto-generated from the message, and PR title/description are auto-generated from commit messages. Streaming responses report the result as <code>github-branch</code> / <code>github-pr</code> / <code>github-error</code> events, or their <code>forgejo-</code> counterparts, each with a <code>forge</code> field.</p>
                     </section>
                 </div>
 
@@ -758,7 +771,7 @@ data: {"type":"done"}</code></pre>
   -H "Content-Type: application/json" \
   -H "X-API-Key: ck_..." \
   -d '{
-    "githubUrl": "https://github.com/user/repo",
+    "repositoryUrl": "https://github.com/user/repo",
     "projectPath": "/tmp/my-location",
     "message": "Review security",
     "cleanup": false
@@ -773,7 +786,7 @@ data: {"type":"done"}</code></pre>
       -H "X-API-Key: ${{ secrets.API_KEY }}" \
       -H "Content-Type: application/json" \
       -d '{
-        "githubUrl": "${{ github.repository }}",
+        "repositoryUrl": "https://github.com/${{ github.repository }}",
         "message": "Review for security",
         "githubToken": "${{ secrets.GITHUB_TOKEN }}"
       }'</code></pre>
@@ -785,7 +798,7 @@ data: {"type":"done"}</code></pre>
   -H "Content-Type: application/json" \
   -H "X-API-Key: ck_..." \
   -d '{
-    "githubUrl": "https://github.com/user/repo",
+    "repositoryUrl": "https://github.com/user/repo",
     "message": "Fix authentication bug",
     "createBranch": true,
     "createPR": true,
@@ -799,10 +812,25 @@ data: {"type":"done"}</code></pre>
   -H "Content-Type: application/json" \
   -H "X-API-Key: ck_..." \
   -d '{
-    "githubUrl": "https://github.com/user/repo",
+    "repositoryUrl": "https://github.com/user/repo",
     "message": "Add user authentication",
     "branchName": "feature/user-auth",
     "createPR": true,
+    "stream": false
+  }'</code></pre>
+                    </div>
+
+                    <div class="example-block">
+                        <h4>Forgejo Branch and PR</h4>
+<pre><code class="language-bash">curl -X POST <span class="api-url">http://localhost:3001</span>/api/agent \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: ck_..." \
+  -d '{
+    "repositoryUrl": "https://codeberg.org/user/repo",
+    "message": "Add user authentication",
+    "branchName": "feature/user-auth",
+    "createPR": true,
+    "forgejoToken": "your_forgejo_token",
     "stream": false
   }'</code></pre>
                     </div>

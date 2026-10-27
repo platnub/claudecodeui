@@ -956,6 +956,12 @@ export type CredentialPublicRow = {
   credential_name: string;
   credential_type: string;
   description: string | null;
+  /**
+   * The service instance a credential belongs to, for credential kinds that are
+   * per-instance (a Forgejo token is only valid on the instance that issued
+   * it). NULL for GitHub tokens and other single-host credentials.
+   */
+  service_url: string | null;
   created_at: string;
   is_active: number;
 };
@@ -970,6 +976,43 @@ export type CreateCredentialResult = {
   id: number | bigint;
   credentialName: string;
   credentialType: string;
+};
+
+// ---------------------------
+//----------------- GIT FORGE TYPES ------------
+/**
+ * A code-hosting service ("forge") the app integrates with beyond plain git:
+ * cloning with a stored token, and opening pull requests through its API.
+ *
+ * `forgejo` also covers Gitea-compatible instances, whose API Forgejo shares.
+ * Anything else is represented by `null` at the call sites that detect a forge,
+ * and gets plain-git behavior only.
+ */
+export type GitForge = 'github' | 'forgejo';
+
+/**
+ * A git remote URL (https, http, ssh:// or scp-like `git@host:owner/repo`)
+ * broken into the parts the forge integrations need.
+ *
+ * - `webOrigin` is where the forge's web UI and API live. For an ssh remote it
+ *   is assumed to be `https://<host>`, since an ssh port says nothing about
+ *   the web port.
+ * - `basePath` is a sub-path install prefix (`/forgejo` in
+ *   `https://example.com/forgejo/owner/repo`), or `''`. Always `''` for ssh.
+ * - `host` is lowercased and excludes the port.
+ * - `webPagePath` is the part after `owner/repo` when the URL is a link to a
+ *   page of the repository copied from the browser (`/tree/main`,
+ *   `/src/branch/main`), or `''` for a plain repository URL. git cannot clone
+ *   a page URL, so the clone paths reject one and suggest the repository URL.
+ */
+export type ParsedRepositoryUrl = {
+  transport: 'https' | 'http' | 'ssh';
+  host: string;
+  webOrigin: string;
+  basePath: string;
+  owner: string;
+  repo: string;
+  webPagePath: string;
 };
 
 // ---------------------------

@@ -30,9 +30,10 @@ CREATE TABLE IF NOT EXISTS user_credentials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     credential_name TEXT NOT NULL,
-    credential_type TEXT NOT NULL, -- 'github_token', 'gitlab_token', 'bitbucket_token', etc.
+    credential_type TEXT NOT NULL, -- 'github_token', 'forgejo_token', etc.
     credential_value TEXT NOT NULL,
     description TEXT,
+    service_url TEXT, -- the instance a per-instance credential (forgejo_token) belongs to
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     is_active BOOLEAN DEFAULT 1,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE

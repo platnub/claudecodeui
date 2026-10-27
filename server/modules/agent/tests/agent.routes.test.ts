@@ -3,13 +3,28 @@ import * as nodeCrypto from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { PassThrough } from 'node:stream';
-import test from 'node:test';
+import test, { after, before, mock } from 'node:test';
 
 import express from 'express';
+
+import { parseRepositoryUrl } from '@/modules/forges/index.js';
 
 import { createAgentRouter } from '../agent.routes.js';
 
 type AgentDependencies = Parameters<typeof createAgentRouter>[0];
+
+// The route logs every step. Under `npm test` each file's output shares its
+// stdout with the runner's serialized results, and this much of it makes
+// Node's runner intermittently fail the whole file ("Unable to deserialize
+// cloned data"). These tests assert on responses and calls, never on logs.
+before(() => {
+  mock.method(console, 'log', () => undefined);
+  mock.method(console, 'error', () => undefined);
+  mock.method(console, 'warn', () => undefined);
+});
+after(() => {
+  mock.restoreAll();
+});
 
 function createDependencies(
   overrides: Partial<AgentDependencies> = {},
@@ -28,6 +43,19 @@ function createDependencies(
     users: { getFirstUser: () => ({ id: 1, username: 'test-user' }) },
     apiKeys: { validateApiKey: () => undefined },
     githubTokens: { getActiveGithubToken: () => null },
+    forgejoTokens: { getActiveForgejoToken: () => null },
+    // Detection without the network or the credentials database: github.com
+    // is GitHub, git.example.com is a Forgejo instance, anything else is unknown.
+    forges: {
+      resolveRepositoryForge: async (repositoryUrl: string, _userId: number, forgeOverride: 'github' | 'forgejo' | null = null) => {
+        const repository = parseRepositoryUrl(repositoryUrl);
+        if (!repository) return null;
+        const detected = repository.host === 'github.com' ? 'github' : repository.host === 'git.example.com' ? 'forgejo' : null;
+        const forge = forgeOverride ?? detected;
+        return { repository, forge, instanceUrl: forge === 'forgejo' ? `${repository.webOrigin}${repository.basePath}` : null };
+      },
+      createForgejoPullRequest: async () => { throw new Error('Forgejo API should not be called'); },
+    },
     projects: { createProjectPath: () => ({ outcome: 'created' }) },
     models: {} as AgentDependencies['models'],
     sessions: {
@@ -83,7 +111,7 @@ test('Agent route rejects missing project input before invoking provider depende
     const body = await response.json() as { error: string };
 
     assert.equal(response.status, 400);
-    assert.equal(body.error, 'Either githubUrl or projectPath is required');
+    assert.equal(body.error, 'Either repositoryUrl (or githubUrl) or projectPath is required');
   });
 });
 
@@ -123,7 +151,7 @@ test('Agent route rejects GitHub lookalike hosts before cloning', async () => {
     const body = await response.json() as { error: string };
 
     assert.equal(response.status, 500);
-    assert.equal(body.error, 'Invalid GitHub URL');
+    assert.match(body.error, /Unsupported repository host/);
   });
 });
 
@@ -168,7 +196,7 @@ test('GitHub cloning keeps credentials out of arguments and remote URL', async (
   ]);
   assert.equal(cloneArgs.length, 6);
   assert.equal(cloneArgs.join(' ').includes(token), false);
-  assert.equal(cloneEnvironment?.CLOUDCLI_GITHUB_TOKEN, token);
+  assert.equal(cloneEnvironment?.CLOUDCLI_GIT_TOKEN, token);
   assert.equal(cloneEnvironment?.GIT_CONFIG_KEY_0, 'credential.helper');
   assert.equal(cloneEnvironment?.GIT_CONFIG_VALUE_0, '');
   assert.equal(cloneEnvironment?.GIT_CONFIG_KEY_1, 'credential.https://github.com.helper');
@@ -420,4 +448,216 @@ test('Agent route reads no model catalog for a continued session of an unregiste
   });
 
   assert.deepEqual(catalogReads, []);
+});
+
+test('Forgejo cloning scopes the stored instance token to that instance', async () => {
+  let cloneArgs: readonly string[] = [];
+  let cloneEnvironment: NodeJS.ProcessEnv | undefined;
+  const tokenLookups: Array<[number, string]> = [];
+  const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; stderr: PassThrough };
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+
+  await withAgentServer(createDependencies({
+    fileSystem: {
+      access: async () => { throw new Error('missing'); },
+      mkdir: async () => undefined,
+    } as unknown as AgentDependencies['fileSystem'],
+    forgejoTokens: {
+      getActiveForgejoToken: (userId: number, instanceUrl: string) => {
+        tokenLookups.push([userId, instanceUrl]);
+        return 'forgejo-secret';
+      },
+    },
+    spawnProcess: ((_command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
+      cloneArgs = args;
+      cloneEnvironment = options.env;
+      process.nextTick(() => child.emit('error', new Error('expected test failure')));
+      return child;
+    }) as unknown as AgentDependencies['spawnProcess'],
+  }), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/agent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ repositoryUrl: 'https://git.example.com/team/repo.git', message: 'Run', stream: false }),
+    });
+    assert.equal(response.status, 500);
+  });
+
+  assert.deepEqual(tokenLookups, [[1, 'https://git.example.com']]);
+  assert.equal(cloneArgs[4], 'https://git.example.com/team/repo.git');
+  assert.equal(cloneArgs.join(' ').includes('forgejo-secret'), false);
+  assert.equal(cloneEnvironment?.CLOUDCLI_GIT_TOKEN, 'forgejo-secret');
+  assert.equal(cloneEnvironment?.GIT_CONFIG_KEY_1, 'credential.https://git.example.com.helper');
+});
+
+test('Agent route rejects a forge value it does not know', async () => {
+  await withAgentServer(createDependencies(), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/agent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectPath: '/home/test/project', message: 'Run', forge: 'gitlab', stream: false }),
+    });
+    assert.equal(response.status, 400);
+  });
+});
+
+test('Agent route pushes a branch and opens a Forgejo pull request for an ssh Forgejo remote', async () => {
+  const spawnedArguments: string[][] = [];
+  const pullRequests: unknown[] = [];
+  const spawnProcess = ((_command: string, args: readonly string[]) => {
+    spawnedArguments.push([...args]);
+    const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; stderr: PassThrough };
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      if (args[0] === 'config') {
+        child.stdout.end('git@git.example.com:team/repo.git\n');
+      } else if (args[0] === 'log') {
+        child.stdout.end('Add the feature');
+      } else {
+        child.stdout.end();
+      }
+      child.emit('close', 0);
+    });
+    return child;
+  }) as unknown as AgentDependencies['spawnProcess'];
+
+  let responseBody: { branch?: { name: string; url: string }; pullRequest?: { number: number; url: string } } = {};
+  await withAgentServer(createDependencies({
+    fileSystem: { access: async () => undefined } as unknown as AgentDependencies['fileSystem'],
+    spawnProcess,
+    models: {
+      getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'default-model' }),
+    } as unknown as AgentDependencies['models'],
+    queryClaude: (async () => undefined) as AgentDependencies['queryClaude'],
+    forgejoTokens: { getActiveForgejoToken: () => 'forgejo-secret' },
+    forges: {
+      ...createDependencies().forges,
+      createForgejoPullRequest: async (input) => {
+        pullRequests.push(input);
+        return { number: 7, url: 'https://git.example.com/team/repo/pulls/7' };
+      },
+    },
+  }), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/agent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectPath: '/home/test/project',
+        message: 'Add the feature',
+        branchName: 'feature/thing',
+        createPR: true,
+        stream: false,
+      }),
+    });
+    assert.equal(response.status, 200);
+    responseBody = await response.json() as typeof responseBody;
+  });
+
+  assert.deepEqual(responseBody.branch, {
+    name: 'feature/thing',
+    url: 'https://git.example.com/team/repo/src/branch/feature/thing',
+  });
+  assert.deepEqual(responseBody.pullRequest, { number: 7, url: 'https://git.example.com/team/repo/pulls/7' });
+  assert.ok(spawnedArguments.some((args) => args.join(' ') === 'push -u origin feature/thing'));
+  assert.equal(pullRequests.length, 1);
+  const pullRequest = pullRequests[0] as { instanceUrl: string; token: string; head: string; base: string; title: string };
+  assert.equal(pullRequest.instanceUrl, 'https://git.example.com');
+  assert.equal(pullRequest.token, 'forgejo-secret');
+  assert.equal(pullRequest.head, 'feature/thing');
+  assert.equal(pullRequest.base, 'main');
+  assert.equal(pullRequest.title, 'Add the feature');
+});
+
+/**
+ * A git stand-in for the branch/PR path: `config` reports `remoteUrl`, every
+ * other command succeeds. Records each command's arguments.
+ */
+function createGitRemoteSpawn(remoteUrl: string, spawnedArguments: string[][]) {
+  return ((_command: string, args: readonly string[]) => {
+    spawnedArguments.push([...args]);
+    const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; stderr: PassThrough };
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    process.nextTick(() => {
+      child.stdout.end(args[0] === 'config' ? `${remoteUrl}\n` : '');
+      child.emit('close', 0);
+    });
+    return child;
+  }) as unknown as AgentDependencies['spawnProcess'];
+}
+
+for (const { remoteUrl, forge, expectedError } of [
+  { remoteUrl: 'git@git.example.com:team/repo.git', forge: 'github', expectedError: /Invalid GitHub URL/ },
+  { remoteUrl: 'git@github.com:owner/repo.git', forge: 'forgejo', expectedError: /github\.com is GitHub/ },
+]) {
+  test(`Agent route refuses forge "${forge}" for the remote ${remoteUrl} before pushing or opening a PR`, async () => {
+    const spawnedArguments: string[][] = [];
+    const pullRequests: unknown[] = [];
+    let octokitCreated = false;
+    let responseBody: { branch?: unknown; pullRequest?: { error?: string } } = {};
+
+    await withAgentServer(createDependencies({
+      fileSystem: { access: async () => undefined } as unknown as AgentDependencies['fileSystem'],
+      spawnProcess: createGitRemoteSpawn(remoteUrl, spawnedArguments),
+      models: {
+        getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'default-model' }),
+      } as unknown as AgentDependencies['models'],
+      queryClaude: (async () => undefined) as AgentDependencies['queryClaude'],
+      githubTokens: { getActiveGithubToken: () => 'github-secret' },
+      forgejoTokens: { getActiveForgejoToken: () => 'forgejo-secret' },
+      forges: {
+        ...createDependencies().forges,
+        createForgejoPullRequest: async (input) => {
+          pullRequests.push(input);
+          return { number: 1, url: 'unexpected' };
+        },
+      },
+      GithubClient: class {
+        constructor() { octokitCreated = true; }
+      } as unknown as AgentDependencies['GithubClient'],
+    }), async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/agent`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          projectPath: '/home/test/project',
+          message: 'Add the feature',
+          branchName: 'feature/thing',
+          createPR: true,
+          forge,
+          forgejoToken: 'request-forgejo-secret',
+          stream: false,
+        }),
+      });
+      assert.equal(response.status, 200);
+      responseBody = await response.json() as typeof responseBody;
+    });
+
+    assert.match(responseBody.pullRequest?.error ?? '', expectedError);
+    assert.equal(spawnedArguments.some((args) => args[0] === 'push'), false);
+    assert.equal(spawnedArguments.some((args) => args[0] === 'checkout'), false);
+    assert.deepEqual(pullRequests, []);
+    assert.equal(octokitCreated, false);
+  });
+}
+
+test('Agent route refuses a link to a repository page before cloning', async () => {
+  await withAgentServer(createDependencies(), async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/agent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        repositoryUrl: 'https://git.example.com/team/repo/src/branch/main',
+        message: 'Run',
+        stream: false,
+      }),
+    });
+    const body = await response.json() as { error: string };
+
+    assert.equal(response.status, 500);
+    assert.match(body.error, /link to a page of the repository/);
+    assert.match(body.error, /Use https:\/\/git\.example\.com\/team\/repo$/);
+  });
 });
