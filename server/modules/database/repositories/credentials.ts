@@ -1,7 +1,7 @@
 /**
  * User credentials repository.
  *
- * Manages external service tokens (GitHub, GitLab, Bitbucket, etc.)
+ * Manages external service tokens (GitHub, Forgejo, etc.)
  * stored per-user. Each credential has a type discriminator so multiple
  * credential kinds can coexist in the same table.
  */
@@ -23,14 +23,15 @@ export const credentialsDb = {
     credentialName: string,
     credentialType: string,
     credentialValue: string,
-    description: string | null = null
+    description: string | null = null,
+    serviceUrl: string | null = null
   ): CreateCredentialResult {
     const db = getConnection();
     const result = db
       .prepare(
-        'INSERT INTO user_credentials (user_id, credential_name, credential_type, credential_value, description) VALUES (?, ?, ?, ?, ?)'
+        'INSERT INTO user_credentials (user_id, credential_name, credential_type, credential_value, description, service_url) VALUES (?, ?, ?, ?, ?, ?)'
       )
-      .run(userId, credentialName, credentialType, credentialValue, description);
+      .run(userId, credentialName, credentialType, credentialValue, description, serviceUrl);
     return {
       id: result.lastInsertRowid,
       credentialName,
@@ -51,14 +52,14 @@ export const credentialsDb = {
     if (credentialType) {
       return db
         .prepare(
-          'SELECT id, credential_name, credential_type, description, created_at, is_active FROM user_credentials WHERE user_id = ? AND credential_type = ? ORDER BY created_at DESC'
+          'SELECT id, credential_name, credential_type, description, service_url, created_at, is_active FROM user_credentials WHERE user_id = ? AND credential_type = ? ORDER BY created_at DESC'
         )
         .all(userId, credentialType) as CredentialPublicRow[];
     }
 
     return db
       .prepare(
-        'SELECT id, credential_name, credential_type, description, created_at, is_active FROM user_credentials WHERE user_id = ? ORDER BY created_at DESC'
+        'SELECT id, credential_name, credential_type, description, service_url, created_at, is_active FROM user_credentials WHERE user_id = ? ORDER BY created_at DESC'
       )
       .all(userId) as CredentialPublicRow[];
   },

@@ -11,10 +11,32 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
+import { parseRepositoryUrl } from '@/modules/forges/index.js';
 import { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
 import { AppError } from '@/shared/utils.js';
 
 type TestDependencies = Parameters<typeof startCloneProject>[2];
+type ResolveForge = NonNullable<TestDependencies>['resolveForge'];
+
+/**
+ * Stands in for network detection and the credentials database: github.com is
+ * GitHub, git.example.com is a Forgejo instance, anything else is unknown.
+ */
+const fakeResolveForge: ResolveForge = async (repositoryUrl, _userId, forgeOverride) => {
+  const repository = parseRepositoryUrl(repositoryUrl);
+  if (!repository) {
+    return null;
+  }
+  const detectedForge = repository.host === 'github.com'
+    ? 'github'
+    : repository.host === 'git.example.com' ? 'forgejo' : null;
+  const forge = forgeOverride ?? detectedForge;
+  return {
+    repository,
+    forge,
+    instanceUrl: forge === 'forgejo' ? `${repository.webOrigin}${repository.basePath}` : null,
+  };
+};
 
 function buildDependencies(overrides: Partial<NonNullable<TestDependencies>> = {}): NonNullable<TestDependencies> {
   return {
@@ -22,7 +44,8 @@ function buildDependencies(overrides: Partial<NonNullable<TestDependencies>> = {
     ensureDirectory: async () => undefined,
     pathExists: async () => false,
     removePath: async () => undefined,
-    getGithubTokenById: async () => ({ github_token: 'token-value' }),
+    getStoredTokenById: async () => ({ token: 'token-value', forge: 'github', instanceUrl: null }),
+    resolveForge: fakeResolveForge,
     spawnGitClone: () => {
       throw new Error('spawnGitClone should be overridden in this test');
     },
@@ -54,7 +77,7 @@ test('startCloneProject rejects when workspace path is missing', async () => {
       startCloneProject(
         {
           workspacePath: '',
-          githubUrl: 'https://github.com/example/repo',
+          repositoryUrl: 'https://github.com/example/repo',
           userId: 1,
         },
         {
@@ -77,7 +100,7 @@ test('startCloneProject rejects when github URL is missing', async () => {
       startCloneProject(
         {
           workspacePath: '/workspace/root',
-          githubUrl: '',
+          repositoryUrl: '',
           userId: 1,
         },
         {
@@ -88,7 +111,7 @@ test('startCloneProject rejects when github URL is missing', async () => {
       ),
     (error: unknown) => {
       assert.ok(error instanceof AppError);
-      assert.equal(error.code, 'GITHUB_URL_REQUIRED');
+      assert.equal(error.code, 'REPOSITORY_URL_REQUIRED');
       return true;
     },
   );
@@ -100,7 +123,7 @@ test('startCloneProject rejects github URL values that begin with option prefixe
       startCloneProject(
         {
           workspacePath: '/workspace/root',
-          githubUrl: '--upload-pack=malicious',
+          repositoryUrl: '--upload-pack=malicious',
           userId: 1,
         },
         {
@@ -111,13 +134,13 @@ test('startCloneProject rejects github URL values that begin with option prefixe
       ),
     (error: unknown) => {
       assert.ok(error instanceof AppError);
-      assert.equal(error.code, 'INVALID_GITHUB_URL');
+      assert.equal(error.code, 'INVALID_REPOSITORY_URL');
       return true;
     },
   );
 });
 
-for (const [label, githubUrl] of [
+for (const [label, repositoryUrl] of [
   ['a token as the user', 'https://ghp_supersecrettoken1234567890abcd@github.com/example/repo.git'],
   ['a user and password', 'https://user:ghp_supersecrettoken1234567890abcd@github.com/example/repo.git'],
   ['a password on an ssh URL', 'ssh://git:secret@github.com/example/repo.git'],
@@ -129,13 +152,13 @@ for (const [label, githubUrl] of [
     await assert.rejects(
       async () =>
         startCloneProject(
-          { workspacePath: '/workspace/root', githubUrl, userId: 1 },
+          { workspacePath: '/workspace/root', repositoryUrl, userId: 1 },
           { onProgress: () => undefined, onComplete: () => undefined },
           buildDependencies({ spawnGitClone: () => { spawned += 1; throw new Error('must not spawn'); } }),
         ),
       (error: unknown) => {
         assert.ok(error instanceof AppError);
-        assert.equal(error.code, 'GITHUB_URL_CARRIES_CREDENTIALS');
+        assert.equal(error.code, 'REPOSITORY_URL_CARRIES_CREDENTIALS');
         assert.ok(!error.message.includes('ghp_supersecrettoken'), 'the error must not echo the credential');
         return true;
       },
@@ -152,13 +175,13 @@ test('startCloneProject rejects an http(s) URL the parser cannot read before git
   await assert.rejects(
     async () =>
       startCloneProject(
-        { workspacePath: '/workspace/root', githubUrl: 'https://ghp_supersecrettoken1234567890abcd@github.com:notaport/example/repo.git', userId: 1 },
+        { workspacePath: '/workspace/root', repositoryUrl: 'https://ghp_supersecrettoken1234567890abcd@github.com:notaport/example/repo.git', userId: 1 },
         { onProgress: () => undefined, onComplete: () => undefined },
         buildDependencies({ spawnGitClone: () => { spawned += 1; throw new Error('must not spawn'); } }),
       ),
     (error: unknown) => {
       assert.ok(error instanceof AppError);
-      assert.equal(error.code, 'INVALID_GITHUB_URL');
+      assert.equal(error.code, 'INVALID_REPOSITORY_URL');
       return true;
     },
   );
@@ -169,7 +192,7 @@ test('startCloneProject accepts the ssh login name that is not a credential', as
   // `git@` on an SSH URL is the login every SSH clone uses, not a secret.
   const gitProcess = createMockGitProcess();
   const operation = await startCloneProject(
-    { workspacePath: '/workspace/root', githubUrl: 'ssh://git@github.com/example/repo.git', userId: 1 },
+    { workspacePath: '/workspace/root', repositoryUrl: 'ssh://git@github.com/example/repo.git', userId: 1 },
     { onProgress: () => undefined, onComplete: () => undefined },
     buildDependencies({ spawnGitClone: () => gitProcess as never }),
   );
@@ -183,8 +206,8 @@ test('startCloneProject rejects when selected github token does not exist', asyn
       startCloneProject(
         {
           workspacePath: '/workspace/root',
-          githubUrl: 'https://github.com/example/repo',
-          githubTokenId: 12,
+          repositoryUrl: 'https://github.com/example/repo',
+          tokenId: 12,
           userId: 1,
         },
         {
@@ -192,12 +215,12 @@ test('startCloneProject rejects when selected github token does not exist', asyn
           onComplete: () => undefined,
         },
         buildDependencies({
-          getGithubTokenById: async () => null,
+          getStoredTokenById: async () => null,
         }),
       ),
     (error: unknown) => {
       assert.ok(error instanceof AppError);
-      assert.equal(error.code, 'GITHUB_TOKEN_NOT_FOUND');
+      assert.equal(error.code, 'FORGE_TOKEN_NOT_FOUND');
       return true;
     },
   );
@@ -213,7 +236,7 @@ test('startCloneProject completes and emits complete payload when git exits succ
   const operation = await startCloneProject(
     {
       workspacePath: '/workspace/root',
-      githubUrl: 'https://github.com/example/repo.git',
+      repositoryUrl: 'https://github.com/example/repo.git',
       userId: 1,
     },
     {
@@ -257,8 +280,8 @@ type SpawnCall = { cloneUrl: string; clonePath: string; environment: NodeJS.Proc
  * the environment. The token has to reach git through the environment alone.
  */
 async function captureSpawnCall(input: {
-  githubTokenId?: number;
-  newGithubToken?: string;
+  tokenId?: number;
+  newToken?: string;
   storedToken?: string;
 }): Promise<SpawnCall> {
   const gitProcess = createMockGitProcess();
@@ -267,9 +290,9 @@ async function captureSpawnCall(input: {
   const operation = await startCloneProject(
     {
       workspacePath: '/workspace/root',
-      githubUrl: 'https://github.com/example/repo.git',
-      githubTokenId: input.githubTokenId,
-      newGithubToken: input.newGithubToken,
+      repositoryUrl: 'https://github.com/example/repo.git',
+      tokenId: input.tokenId,
+      newToken: input.newToken,
       userId: 1,
     },
     {
@@ -277,7 +300,7 @@ async function captureSpawnCall(input: {
       onComplete: () => undefined,
     },
     buildDependencies({
-      getGithubTokenById: async () => ({ github_token: input.storedToken ?? 'unused' }),
+      getStoredTokenById: async () => ({ token: input.storedToken ?? 'unused', forge: 'github', instanceUrl: null }),
       spawnGitClone: (cloneUrl, clonePath, environment) => {
         spawnCall = { cloneUrl, clonePath, environment };
         return gitProcess as any;
@@ -293,10 +316,10 @@ async function captureSpawnCall(input: {
 }
 
 for (const [label, input, token] of [
-  ['a stored token', { githubTokenId: 7, storedToken: 'ghp_storedsecret1234567890' }, 'ghp_storedsecret1234567890'],
+  ['a stored token', { tokenId: 7, storedToken: 'ghp_storedsecret1234567890' }, 'ghp_storedsecret1234567890'],
   // Characters `url.username=` would have percent-encoded, so a check for the
   // raw token alone could not have caught the URL channel.
-  ['a new token', { newGithubToken: 'ghp_new:secret@with/odd-chars' }, 'ghp_new:secret@with/odd-chars'],
+  ['a new token', { newToken: 'ghp_new:secret@with/odd-chars' }, 'ghp_new:secret@with/odd-chars'],
 ] as const) {
   test(`startCloneProject hands git ${label} through the credential helper, never the clone URL`, async () => {
     const { cloneUrl, clonePath, environment } = await captureSpawnCall(input);
@@ -306,18 +329,18 @@ for (const [label, input, token] of [
     assert.equal(cloneUrl, 'https://github.com/example/repo.git');
     assert.equal(clonePath, path.join('/workspace/root', 'repo'));
 
-    assert.equal(environment.CLOUDCLI_GITHUB_TOKEN, token);
+    assert.equal(environment.CLOUDCLI_GIT_TOKEN, token);
     assert.equal(environment.GIT_CONFIG_COUNT, '2');
     assert.equal(environment.GIT_CONFIG_KEY_0, 'credential.helper');
     assert.equal(environment.GIT_CONFIG_VALUE_0, '');
     assert.equal(environment.GIT_CONFIG_KEY_1, 'credential.https://github.com.helper');
-    assert.match(environment.GIT_CONFIG_VALUE_1 ?? '', /\$CLOUDCLI_GITHUB_TOKEN/);
+    assert.match(environment.GIT_CONFIG_VALUE_1 ?? '', /\$CLOUDCLI_GIT_TOKEN/);
     assert.equal(environment.GIT_TERMINAL_PROMPT, '0');
 
     // The helper's command line is itself a process argv, so the token must be
     // read from the variable rather than pasted into the helper text.
     for (const [name, value] of Object.entries(environment)) {
-      if (name === 'CLOUDCLI_GITHUB_TOKEN') {
+      if (name === 'CLOUDCLI_GIT_TOKEN') {
         continue;
       }
       assert.ok(!(value ?? '').includes(token), `token leaked into ${name}`);
@@ -331,7 +354,7 @@ test('startCloneProject leaves the credential helper unset when no token was giv
   assert.equal(cloneUrl, 'https://github.com/example/repo.git');
   assert.equal(environment.GIT_TERMINAL_PROMPT, '0');
   assert.equal(environment.GIT_CONFIG_COUNT, undefined);
-  assert.equal(environment.CLOUDCLI_GITHUB_TOKEN, undefined);
+  assert.equal(environment.CLOUDCLI_GIT_TOKEN, undefined);
 });
 
 /**
@@ -349,8 +372,8 @@ async function runCloneWithStderr(
   const operation = await startCloneProject(
     {
       workspacePath: '/workspace/root',
-      githubUrl: 'https://github.com/example/repo.git',
-      newGithubToken: 'ghp_supersecrettoken1234567890abcd',
+      repositoryUrl: 'https://github.com/example/repo.git',
+      newToken: 'ghp_supersecrettoken1234567890abcd',
       userId: 1,
     },
     {
@@ -388,8 +411,8 @@ test('startCloneProject forwards each stderr chunk to onProgress as it arrives',
   const operation = await startCloneProject(
     {
       workspacePath: '/workspace/root',
-      githubUrl: 'https://github.com/example/repo.git',
-      newGithubToken: 'ghp_supersecrettoken1234567890abcd',
+      repositoryUrl: 'https://github.com/example/repo.git',
+      newToken: 'ghp_supersecrettoken1234567890abcd',
       userId: 1,
     },
     {
@@ -484,8 +507,8 @@ test('startCloneProject clones a real repository with the credential helper in g
     const operation = await startCloneProject(
       {
         workspacePath,
-        githubUrl: originUrl,
-        newGithubToken: token,
+        repositoryUrl: originUrl,
+        newToken: token,
         userId: 1,
       },
       {
@@ -498,6 +521,13 @@ test('startCloneProject clones a real repository with the credential helper in g
       },
       {
         validatePath: async () => ({ valid: true, resolvedPath: workspacePath }),
+        // file:// is no forge URL; a GitHub resolution stands in so the
+        // token-carrying environment is built and handed to real git.
+        resolveForge: async () => ({
+          repository: parseRepositoryUrl('https://github.com/example/repo')!,
+          forge: 'github',
+          instanceUrl: null,
+        }),
         registerProject: async (projectPath, customName) => ({
           project: { path: projectPath, name: customName },
         }),
@@ -539,9 +569,9 @@ test('startCloneProject offers the GitHub token to no host but github.com', asyn
   try {
     let failure = '';
     const operation = await startCloneProject(
-      { workspacePath: root, githubUrl: `http://127.0.0.1:${port}/example/repo.git`, newGithubToken: token, userId: 1 },
+      { workspacePath: root, repositoryUrl: `http://127.0.0.1:${port}/example/repo.git`, forge: 'github', newToken: token, userId: 1 },
       { onProgress: () => undefined, onComplete: () => undefined },
-      { validatePath: async () => ({ valid: true, resolvedPath: root }) },
+      { validatePath: async () => ({ valid: true, resolvedPath: root }), resolveForge: fakeResolveForge },
     );
     await operation.waitForCompletion.catch((error: unknown) => { failure = error instanceof Error ? error.message : String(error); });
 
@@ -557,3 +587,98 @@ test('startCloneProject offers the GitHub token to no host but github.com', asyn
   }
 });
 
+
+/** Runs a clone with the given input and dependency overrides, returning git's spawn call or the rejection. */
+async function attemptClone(
+  input: Partial<Parameters<typeof startCloneProject>[0]>,
+  overrides: Partial<NonNullable<TestDependencies>> = {},
+): Promise<{ spawnCall: SpawnCall | null; failure: AppError | null }> {
+  const gitProcess = createMockGitProcess();
+  let spawnCall: SpawnCall | null = null;
+  try {
+    const operation = await startCloneProject(
+      { workspacePath: '/workspace/root', repositoryUrl: '', userId: 1, ...input },
+      { onProgress: () => undefined, onComplete: () => undefined },
+      buildDependencies({
+        spawnGitClone: (cloneUrl, clonePath, environment) => {
+          spawnCall = { cloneUrl, clonePath, environment };
+          return gitProcess as any;
+        },
+        ...overrides,
+      }),
+    );
+    gitProcess.emit('close', 0);
+    await operation.waitForCompletion;
+    return { spawnCall, failure: null };
+  } catch (error) {
+    return { spawnCall, failure: error as AppError };
+  }
+}
+
+test('startCloneProject offers a stored Forgejo token only to its own instance', async () => {
+  const { spawnCall, failure } = await attemptClone(
+    { repositoryUrl: 'https://git.example.com/team/repo.git', tokenId: 4 },
+    {
+      getStoredTokenById: async () => ({
+        token: 'forgejo-secret',
+        forge: 'forgejo',
+        instanceUrl: 'https://git.example.com',
+      }),
+    },
+  );
+
+  assert.equal(failure, null);
+  const environment = (spawnCall as SpawnCall | null)?.environment ?? {};
+  assert.equal(environment.CLOUDCLI_GIT_TOKEN, 'forgejo-secret');
+  assert.equal(environment.GIT_CONFIG_KEY_1, 'credential.https://git.example.com.helper');
+  assert.equal((spawnCall as SpawnCall | null)?.cloneUrl, 'https://git.example.com/team/repo.git');
+});
+
+test('startCloneProject refuses a Forgejo token stored for another instance', async () => {
+  const { spawnCall, failure } = await attemptClone(
+    { repositoryUrl: 'https://git.example.com/team/repo.git', tokenId: 4 },
+    {
+      getStoredTokenById: async () => ({
+        token: 'forgejo-secret',
+        forge: 'forgejo',
+        instanceUrl: 'https://codeberg.org',
+      }),
+    },
+  );
+
+  assert.equal(spawnCall, null);
+  assert.equal(failure?.code, 'FORGE_TOKEN_INSTANCE_MISMATCH');
+});
+
+test('startCloneProject never sends a Forgejo token over plain http', async () => {
+  const { spawnCall, failure } = await attemptClone({
+    repositoryUrl: 'http://git.example.com/team/repo.git',
+    forge: 'forgejo',
+    newToken: 'forgejo-secret',
+  });
+
+  assert.equal(spawnCall, null);
+  assert.equal(failure?.code, 'FORGE_TOKEN_REQUIRES_HTTPS');
+});
+
+test('startCloneProject asks for the host when a token is given for an unrecognised one', async () => {
+  const { spawnCall, failure } = await attemptClone({
+    repositoryUrl: 'https://unknown.example/team/repo.git',
+    newToken: 'some-token',
+  });
+
+  assert.equal(spawnCall, null);
+  assert.equal(failure?.code, 'FORGE_UNDETECTED');
+});
+
+test('startCloneProject clones from an unrecognised host without a token, no detection needed', async () => {
+  let resolved = false;
+  const { spawnCall, failure } = await attemptClone(
+    { repositoryUrl: 'https://unknown.example/team/repo.git' },
+    { resolveForge: async () => { resolved = true; return null; } },
+  );
+
+  assert.equal(failure, null);
+  assert.equal(resolved, false);
+  assert.equal((spawnCall as SpawnCall | null)?.environment.GIT_CONFIG_COUNT, undefined);
+});

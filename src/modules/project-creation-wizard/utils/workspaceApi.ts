@@ -1,9 +1,21 @@
 import { api } from '@/shared/api';
-import type { FolderSuggestion, GithubTokenCredential, TokenMode } from '@/shared/types';
+import type {
+  FolderSuggestion,
+  ForgeDetectionResult,
+  ForgeTokenCredential,
+  GitForge,
+  TokenMode,
+} from '@/shared/types';
 
 type CredentialsResponse = {
-  credentials?: GithubTokenCredential[];
+  credentials?: ForgeTokenCredential[];
   error?: string;
+};
+
+/** The credential type each forge's tokens are stored under. */
+const FORGE_CREDENTIAL_TYPES: Record<GitForge, string> = {
+  github: 'github_token',
+  forgejo: 'forgejo_token',
 };
 
 type BrowseFilesystemResponse = {
@@ -46,10 +58,12 @@ type CloneProgressEvent = {
 
 type CloneWorkspaceParams = {
   workspacePath: string;
-  githubUrl: string;
+  repositoryUrl: string;
+  /** The forge the user picked; null lets the server detect it from the URL. */
+  forge: GitForge | null;
   tokenMode: TokenMode;
-  selectedGithubToken: string;
-  newGithubToken: string;
+  selectedToken: string;
+  newToken: string;
 };
 
 type CloneProgressHandlers = {
@@ -97,15 +111,40 @@ const resolveCreateProjectErrorMessage = (responseData: CreateProjectResponse): 
   return null;
 };
 
-export const fetchGithubTokenCredentials = async () => {
-  const response = await api.settings.credentials('github_token');
-  const data = await parseJson<CredentialsResponse>(response);
+// Loads the active GitHub and Forgejo tokens together; the wizard filters them
+// by the forge (and Forgejo instance) the repository URL resolves to.
+export const fetchForgeTokenCredentials = async () => {
+  const credentialLists = await Promise.all(
+    Object.values(FORGE_CREDENTIAL_TYPES).map(async (credentialType) => {
+      const response = await api.settings.credentials(credentialType);
+      const data = await parseJson<CredentialsResponse>(response);
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to load stored tokens');
+      }
+
+      return data.credentials || [];
+    }),
+  );
+
+  return credentialLists.flat().filter((credential) => credential.is_active);
+};
+
+// Whether a credential row is a token for the given forge.
+export const isCredentialForForge = (credential: ForgeTokenCredential, forge: GitForge) =>
+  credential.credential_type === FORGE_CREDENTIAL_TYPES[forge];
+
+// Asks the server which forge a repository URL lives on (it knows the user's
+// stored Forgejo instances and can probe an unknown host).
+export const detectRepositoryForge = async (repositoryUrl: string): Promise<ForgeDetectionResult> => {
+  const response = await api.detectRepositoryForge(repositoryUrl);
+  const data = await parseJson<Partial<ForgeDetectionResult> & { error?: string }>(response);
 
   if (!response.ok) {
-    throw new Error(data.error || 'Failed to load GitHub tokens');
+    throw new Error(data.error || 'Failed to detect the repository host');
   }
 
-  return (data.credentials || []).filter((credential) => credential.is_active);
+  return { forge: data.forge ?? null, instanceUrl: data.instanceUrl ?? null };
 };
 
 export const browseFilesystemFolders = async (pathToBrowse: string) => {
@@ -153,16 +192,18 @@ type StartCloneResponse = {
 // the id the progress stream is opened with, so the token never enters a URL.
 const startClone = async ({
   workspacePath,
-  githubUrl,
+  repositoryUrl,
+  forge,
   tokenMode,
-  selectedGithubToken,
-  newGithubToken,
+  selectedToken,
+  newToken,
 }: CloneWorkspaceParams) => {
   const response = await api.startProjectClone({
     path: workspacePath.trim(),
-    githubUrl: githubUrl.trim(),
-    githubTokenId: tokenMode === 'stored' && selectedGithubToken ? Number(selectedGithubToken) : null,
-    newGithubToken: tokenMode === 'new' ? newGithubToken.trim() : null,
+    repositoryUrl: repositoryUrl.trim(),
+    forge,
+    tokenId: tokenMode === 'stored' && selectedToken ? Number(selectedToken) : null,
+    newToken: tokenMode === 'new' ? newToken.trim() : null,
   });
   const data = await parseJson<StartCloneResponse>(response);
 

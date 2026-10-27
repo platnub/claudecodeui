@@ -2,10 +2,12 @@ import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { isSshGitUrl } from '@/modules/project-creation-wizard/utils/pathUtils';
-import type { WizardFormState } from '@/shared/types';
+import type { GitForge, WizardFormState } from '@/shared/types';
 
 type StepReviewProps = {
   formState: WizardFormState;
+  /** The forge the clone will use, or null when the host is neither GitHub nor Forgejo. */
+  effectiveForge: GitForge | null;
   selectedTokenName: string | null;
   isCreating: boolean;
   cloneProgress: string;
@@ -14,6 +16,7 @@ type StepReviewProps = {
 /** Rendered by ProjectCreationWizard as step 2, summarising the chosen configuration and streaming clone progress. */
 export default function StepReview({
   formState,
+  effectiveForge,
   selectedTokenName,
   isCreating,
   cloneProgress,
@@ -21,15 +24,15 @@ export default function StepReview({
   const { t } = useTranslation();
 
   const authenticationLabel = useMemo(() => {
-    if (formState.tokenMode === 'stored' && formState.selectedGithubToken) {
+    if (formState.tokenMode === 'stored' && formState.selectedToken) {
       return `${t('projectWizard.step3.usingStoredToken')} ${selectedTokenName || t('common:misc.unknownProvider')}`;
     }
 
-    if (formState.tokenMode === 'new' && formState.newGithubToken.trim()) {
+    if (formState.tokenMode === 'new' && formState.newToken.trim()) {
       return t('projectWizard.step3.usingProvidedToken');
     }
 
-    if (isSshGitUrl(formState.githubUrl)) {
+    if (isSshGitUrl(formState.repositoryUrl)) {
       return t('projectWizard.step3.sshKey', { defaultValue: 'SSH Key' });
     }
 
@@ -51,14 +54,27 @@ export default function StepReview({
             </span>
           </div>
 
-          {formState.githubUrl && (
+          {formState.repositoryUrl && (
             <>
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600 dark:text-gray-400">
                   {t('projectWizard.step3.cloneFrom')}
                 </span>
                 <span className="break-all font-mono text-xs text-gray-900 dark:text-white">
-                  {formState.githubUrl}
+                  {formState.repositoryUrl}
+                </span>
+              </div>
+
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-600 dark:text-gray-400">
+                  {t('projectWizard.step3.host')}
+                </span>
+                <span className="text-xs text-gray-900 dark:text-white">
+                  {effectiveForge === 'github'
+                    ? t('projectWizard.step2.forgeGithub')
+                    : effectiveForge === 'forgejo'
+                      ? t('projectWizard.step2.forgeForgejo')
+                      : t('projectWizard.step3.otherHost')}
                 </span>
               </div>
 
@@ -85,7 +101,7 @@ export default function StepReview({
           </div>
         ) : (
           <p className="text-sm text-blue-800 dark:text-blue-200">
-            {formState.githubUrl
+            {formState.repositoryUrl
               ? t('projectWizard.step3.newWithClone')
               : t('projectWizard.step3.newEmpty')}
           </p>

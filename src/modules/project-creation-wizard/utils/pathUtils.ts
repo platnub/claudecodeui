@@ -6,11 +6,22 @@ export const isSshGitUrl = (url: string): boolean => {
   return SSH_PREFIXES.some((prefix) => trimmedUrl.startsWith(prefix));
 };
 
-export const shouldShowGithubAuthentication = (githubUrl: string): boolean =>
-  githubUrl.trim().length > 0 && !isSshGitUrl(githubUrl);
+export const shouldShowRepositoryAuthentication = (repositoryUrl: string): boolean =>
+  repositoryUrl.trim().length > 0 && !isSshGitUrl(repositoryUrl);
 
-export const isCloneWorkflow = (githubUrl: string): boolean =>
-  githubUrl.trim().length > 0;
+export const isCloneWorkflow = (repositoryUrl: string): boolean =>
+  repositoryUrl.trim().length > 0;
+
+// The https origin a stored Forgejo token's instance URL is compared with, or
+// null for a URL that cannot hold a token (ssh, unparsable).
+export const getHttpsOrigin = (url: string): string | null => {
+  try {
+    const parsedUrl = new URL(url.trim());
+    return parsedUrl.protocol === 'https:' ? parsedUrl.origin.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+};
 
 export const getSuggestionRootPath = (inputPath: string): string => {
   const trimmedPath = inputPath.trim();

@@ -10,6 +10,7 @@ import test from 'node:test';
 import express from 'express';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { parseRepositoryUrl } from '@/modules/forges/index.js';
 import { chatRunRegistry, connectedClients } from '@/modules/websocket/index.js';
 import type { NormalizedMessage } from '@/shared/types.js';
 import { createNormalizedMessage } from '@/shared/utils.js';
@@ -60,6 +61,19 @@ function createDependencies(queryClaude: RunFunction): AgentDependencies {
     users: { getFirstUser: () => ({ id: 1, username: 'test-user' }) },
     apiKeys: { validateApiKey: () => undefined },
     githubTokens: { getActiveGithubToken: () => null },
+    forgejoTokens: { getActiveForgejoToken: () => null },
+    // Detection without the network or the credentials database: github.com
+    // is GitHub, git.example.com is a Forgejo instance, anything else is unknown.
+    forges: {
+      resolveRepositoryForge: async (repositoryUrl: string, _userId: number, forgeOverride: 'github' | 'forgejo' | null = null) => {
+        const repository = parseRepositoryUrl(repositoryUrl);
+        if (!repository) return null;
+        const detected = repository.host === 'github.com' ? 'github' : repository.host === 'git.example.com' ? 'forgejo' : null;
+        const forge = forgeOverride ?? detected;
+        return { repository, forge, instanceUrl: forge === 'forgejo' ? `${repository.webOrigin}${repository.basePath}` : null };
+      },
+      createForgejoPullRequest: async () => { throw new Error('Forgejo API should not be called'); },
+    },
     projects: { createProjectPath: () => ({ outcome: 'created' }) },
     models: { getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'default-model' }) } as unknown as AgentDependencies['models'],
     sessions: {

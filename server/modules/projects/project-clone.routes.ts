@@ -1,6 +1,9 @@
 import express, { type Request } from 'express';
 
-import type { PendingCloneRequests } from '@/modules/projects/services/project-clone-request.service.js';
+import type {
+  PendingCloneRequest,
+  PendingCloneRequests,
+} from '@/modules/projects/services/project-clone-request.service.js';
 import type { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
 import { AppError, asyncHandler } from '@/shared/utils.js';
 
@@ -26,6 +29,36 @@ function requireAuthenticatedUserId(req: Request): number | string {
   return userId;
 }
 
+function optionalString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function optionalNumber(value: unknown): number | null {
+  return typeof value === 'number' ? value : null;
+}
+
+/**
+ * Reads a clone request body. The current fields are `repositoryUrl`, `forge`,
+ * `tokenId` and `newToken`; the GitHub-only names earlier clients send
+ * (`githubUrl`, `githubTokenId`, `newGithubToken`) are still accepted, and a
+ * typed `newGithubToken` keeps meaning a GitHub token.
+ */
+function parseCloneRequestBody(requestBody: Record<string, unknown>): PendingCloneRequest {
+  const requestedForge = requestBody.forge === 'github' || requestBody.forge === 'forgejo'
+    ? requestBody.forge
+    : null;
+  const legacyNewGithubToken = optionalString(requestBody.newGithubToken);
+  const newToken = optionalString(requestBody.newToken) ?? legacyNewGithubToken;
+
+  return {
+    workspacePath: optionalString(requestBody.path) ?? '',
+    repositoryUrl: optionalString(requestBody.repositoryUrl) ?? optionalString(requestBody.githubUrl) ?? '',
+    forge: requestedForge ?? (legacyNewGithubToken !== null && requestBody.newToken === undefined ? 'github' : null),
+    tokenId: optionalNumber(requestBody.tokenId) ?? optionalNumber(requestBody.githubTokenId),
+    newToken,
+  };
+}
+
 function resolveRouteErrorMessage(error: unknown): string {
   if (error instanceof AppError) {
     return error.message;
@@ -41,7 +74,7 @@ function resolveRouteErrorMessage(error: unknown): string {
 /**
  * Creates the two halves of a repository clone. The browser's EventSource can
  * only issue a bare GET, and a GET's URL is written to access logs, proxy logs
- * and browser history — so the request that carries the GitHub token is a
+ * and browser history — so the request that carries the forge token is a
  * POST, and the stream's URL names it by an opaque id.
  */
 export function createProjectCloneRouter(dependencies: ProjectCloneRouterDependencies): express.Router {
@@ -56,12 +89,7 @@ export function createProjectCloneRouter(dependencies: ProjectCloneRouterDepende
     asyncHandler(async (req, res) => {
       const userId = requireAuthenticatedUserId(req);
       const requestBody = req.body as Record<string, unknown>;
-      const cloneId = dependencies.pendingCloneRequests.add(userId, {
-        workspacePath: typeof requestBody.path === 'string' ? requestBody.path : '',
-        githubUrl: typeof requestBody.githubUrl === 'string' ? requestBody.githubUrl : '',
-        githubTokenId: typeof requestBody.githubTokenId === 'number' ? requestBody.githubTokenId : null,
-        newGithubToken: typeof requestBody.newGithubToken === 'string' ? requestBody.newGithubToken : null,
-      });
+      const cloneId = dependencies.pendingCloneRequests.add(userId, parseCloneRequestBody(requestBody));
 
       res.json({ cloneId });
     }),

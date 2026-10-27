@@ -1275,12 +1275,25 @@ export type ExistingPrdFile = {
 
 // ---------------------------
 
+//----------------- GIT FORGES ------------
+
+/** A code-hosting service the app integrates with beyond plain git (token-authenticated clones, pull requests); Forgejo also covers Gitea-compatible instances. */
+export type GitForge = 'github' | 'forgejo';
+
+/** What the server's forge detection says about a repository URL: its forge (null when it is neither GitHub nor Forgejo) and, for Forgejo, the instance URL tokens are matched against. */
+export type ForgeDetectionResult = {
+  forge: GitForge | null;
+  instanceUrl: string | null;
+};
+
+// ---------------------------
+
 //----------------- PROJECT CREATION WIZARD ------------
 
 /** The one-based index of the step currently shown by the project-creation wizard: 1 configures the workspace, 2 reviews it before creation. */
 export type WizardStep = 1 | 2;
 
-/** How the project-creation wizard authenticates a GitHub clone: reuse a 'stored' credential, enter a 'new' token, or use 'none' and rely on public access or an SSH key. */
+/** How the project-creation wizard authenticates a GitHub or Forgejo clone: reuse a 'stored' credential, enter a 'new' token, or use 'none' and rely on public access or an SSH key. */
 export type TokenMode = 'stored' | 'new' | 'none';
 
 /** One filesystem directory returned by the browse-filesystem endpoint, used to populate workspace-path autocomplete and the folder browser. */
@@ -1290,20 +1303,26 @@ export type FolderSuggestion = {
   type?: string;
 };
 
-/** A stored GitHub token credential as returned by the credentials endpoint, listed so the user can pick which token authenticates a clone. */
-export type GithubTokenCredential = {
+/** A stored GitHub or Forgejo token credential as returned by the credentials endpoint, listed so the user can pick which token authenticates a clone; `service_url` is the Forgejo instance the token belongs to (null for GitHub). */
+export type ForgeTokenCredential = {
   id: number;
   credential_name: string;
+  credential_type: string;
+  service_url?: string | null;
   is_active: boolean;
 };
+
+/** The repository host chosen in the project-creation wizard: 'auto' lets the server detect it from the URL, or the user forces GitHub or Forgejo. */
+export type ForgeSelection = GitForge | 'auto';
 
 /** The full set of user-entered values carried across the project-creation wizard's steps, owned by ProjectCreationWizard and passed down to each step. */
 export type WizardFormState = {
   workspacePath: string;
-  githubUrl: string;
+  repositoryUrl: string;
+  forgeSelection: ForgeSelection;
   tokenMode: TokenMode;
-  selectedGithubToken: string;
-  newGithubToken: string;
+  selectedToken: string;
+  newToken: string;
 };
 
 // ---------------------------
@@ -1498,11 +1517,12 @@ export type CreatedApiKey = {
   createdAt?: string;
 };
 
-/** One stored GitHub credential as the server returns it, in snake_case, carrying its name, optional description, creation timestamp and active flag - never the token itself. */
-export type GithubCredentialItem = {
+/** One stored GitHub or Forgejo credential as the server returns it, in snake_case, carrying its name, optional description, Forgejo instance (`service_url`), creation timestamp and active flag - never the token itself. */
+export type ForgeCredentialItem = {
   id: string;
   credential_name: string;
   description?: string | null;
+  service_url?: string | null;
   created_at: string;
   is_active: boolean;
 };

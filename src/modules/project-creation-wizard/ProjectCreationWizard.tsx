@@ -7,10 +7,11 @@ import StepConfiguration from '@/modules/project-creation-wizard/StepConfigurati
 import StepReview from '@/modules/project-creation-wizard/StepReview';
 import WizardFooter from '@/modules/project-creation-wizard/WizardFooter';
 import WizardProgress from '@/modules/project-creation-wizard/WizardProgress';
-import { useGithubTokens } from '@/modules/project-creation-wizard/hooks/useGithubTokens';
+import { useForgeDetection } from '@/modules/project-creation-wizard/hooks/useForgeDetection';
+import { useForgeTokens } from '@/modules/project-creation-wizard/hooks/useForgeTokens';
 import { cloneWorkspaceWithProgress, createProjectRequest } from '@/modules/project-creation-wizard/utils/workspaceApi';
-import { isCloneWorkflow, shouldShowGithubAuthentication } from '@/modules/project-creation-wizard/utils/pathUtils';
-import type { TokenMode, WizardFormState, WizardStep } from '@/shared/types';
+import { isCloneWorkflow, shouldShowRepositoryAuthentication } from '@/modules/project-creation-wizard/utils/pathUtils';
+import type { ForgeSelection, TokenMode, WizardFormState, WizardStep } from '@/shared/types';
 
 type ProjectCreationWizardProps = {
   onClose: () => void;
@@ -19,13 +20,14 @@ type ProjectCreationWizardProps = {
 
 const initialFormState: WizardFormState = {
   workspacePath: '',
-  githubUrl: '',
+  repositoryUrl: '',
+  forgeSelection: 'auto',
   tokenMode: 'stored',
-  selectedGithubToken: '',
-  newGithubToken: '',
+  selectedToken: '',
+  newToken: '',
 };
 
-/** Rendered by the sidebar module's modal layer to create a new project or clone one from GitHub. */
+/** Rendered by the sidebar module's modal layer to create a new project or clone one from GitHub or Forgejo. */
 export default function ProjectCreationWizard({
   onClose,
   onProjectCreated,
@@ -38,10 +40,19 @@ export default function ProjectCreationWizard({
   const [cloneProgress, setCloneProgress] = useState('');
 
   const shouldLoadTokens =
-    step === 1 && shouldShowGithubAuthentication(formState.githubUrl);
+    step === 1 && shouldShowRepositoryAuthentication(formState.repositoryUrl);
+
+  // Detection keeps running for ssh URLs too: the review step names the host.
+  const { detected, detecting: detectingForge } = useForgeDetection(
+    formState.repositoryUrl,
+    isCloneWorkflow(formState.repositoryUrl),
+  );
+  const effectiveForge = formState.forgeSelection === 'auto'
+    ? detected.forge
+    : formState.forgeSelection;
 
   const autoSelectToken = useCallback((tokenId: string) => {
-    setFormState((previous) => ({ ...previous, selectedGithubToken: tokenId }));
+    setFormState((previous) => ({ ...previous, selectedToken: tokenId }));
   }, []);
 
   const {
@@ -49,9 +60,12 @@ export default function ProjectCreationWizard({
     loading: loadingTokens,
     loadError: tokenLoadError,
     selectedTokenName,
-  } = useGithubTokens({
+  } = useForgeTokens({
     shouldLoad: shouldLoadTokens,
-    selectedTokenId: formState.selectedGithubToken,
+    forge: effectiveForge,
+    repositoryUrl: formState.repositoryUrl,
+    instanceUrl: effectiveForge === 'forgejo' ? detected.instanceUrl : null,
+    selectedTokenId: formState.selectedToken,
     onAutoSelectToken: autoSelectToken,
   });
 
@@ -88,16 +102,20 @@ export default function ProjectCreationWizard({
     setCloneProgress('');
 
     try {
-      const shouldCloneRepository = isCloneWorkflow(formState.githubUrl);
+      const shouldCloneRepository = isCloneWorkflow(formState.repositoryUrl);
 
       if (shouldCloneRepository) {
+        // No token for a host that is neither GitHub nor Forgejo: the server
+        // would refuse to guess where it may send it.
+        const hasForge = effectiveForge !== null;
         const project = await cloneWorkspaceWithProgress(
           {
             workspacePath: formState.workspacePath,
-            githubUrl: formState.githubUrl,
-            tokenMode: formState.tokenMode,
-            selectedGithubToken: formState.selectedGithubToken,
-            newGithubToken: formState.newGithubToken,
+            repositoryUrl: formState.repositoryUrl,
+            forge: formState.forgeSelection === 'auto' ? null : formState.forgeSelection,
+            tokenMode: hasForge ? formState.tokenMode : 'none',
+            selectedToken: formState.selectedToken,
+            newToken: formState.newToken,
           },
           {
             onProgress: setCloneProgress,
@@ -124,11 +142,11 @@ export default function ProjectCreationWizard({
     } finally {
       setIsCreating(false);
     }
-  }, [formState, onClose, onProjectCreated, t]);
+  }, [effectiveForge, formState, onClose, onProjectCreated, t]);
 
   const shouldCloneRepository = useMemo(
-    () => isCloneWorkflow(formState.githubUrl),
-    [formState.githubUrl],
+    () => isCloneWorkflow(formState.repositoryUrl),
+    [formState.repositoryUrl],
   );
 
   return (
@@ -160,23 +178,26 @@ export default function ProjectCreationWizard({
           {step === 1 && (
             <StepConfiguration
               workspacePath={formState.workspacePath}
-              githubUrl={formState.githubUrl}
+              repositoryUrl={formState.repositoryUrl}
+              forgeSelection={formState.forgeSelection}
+              detectedForge={detected.forge}
+              detectingForge={detectingForge}
+              effectiveForge={effectiveForge}
               tokenMode={formState.tokenMode}
-              selectedGithubToken={formState.selectedGithubToken}
-              newGithubToken={formState.newGithubToken}
+              selectedToken={formState.selectedToken}
+              newToken={formState.newToken}
               availableTokens={availableTokens}
               loadingTokens={loadingTokens}
               tokenLoadError={tokenLoadError}
               isCreating={isCreating}
               onWorkspacePathChange={(workspacePath) => updateField('workspacePath', workspacePath)}
-              onGithubUrlChange={(githubUrl) => updateField('githubUrl', githubUrl)}
+              onRepositoryUrlChange={(repositoryUrl) => updateField('repositoryUrl', repositoryUrl)}
+              onForgeSelectionChange={(forgeSelection: ForgeSelection) =>
+                updateField('forgeSelection', forgeSelection)
+              }
               onTokenModeChange={updateTokenMode}
-              onSelectedGithubTokenChange={(selectedGithubToken) =>
-                updateField('selectedGithubToken', selectedGithubToken)
-              }
-              onNewGithubTokenChange={(newGithubToken) =>
-                updateField('newGithubToken', newGithubToken)
-              }
+              onSelectedTokenChange={(selectedToken) => updateField('selectedToken', selectedToken)}
+              onNewTokenChange={(newToken) => updateField('newToken', newToken)}
               onAdvanceToConfirm={() => setStep(2)}
             />
           )}
@@ -184,6 +205,7 @@ export default function ProjectCreationWizard({
           {step === 2 && (
             <StepReview
               formState={formState}
+              effectiveForge={effectiveForge}
               selectedTokenName={selectedTokenName}
               isCreating={isCreating}
               cloneProgress={cloneProgress}

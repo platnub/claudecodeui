@@ -4,17 +4,37 @@ import path from 'node:path';
 // cross-spawn: drop-in spawn with Windows .cmd/PATHEXT resolution.
 import spawn from 'cross-spawn';
 
-import { githubTokensDb } from '@/modules/database/index.js';
+import { forgejoTokensDb, githubTokensDb } from '@/modules/database/index.js';
+import {
+  buildTokenCredentialEnvironment,
+  getTokenCredentialOrigin,
+  resolveRepositoryForge,
+  type ResolvedRepositoryForge,
+} from '@/modules/forges/index.js';
 import { createProject } from '@/modules/projects/services/project-management.service.js';
-import type { WorkspacePathValidationResult } from '@/shared/types.js';
+import type { GitForge, WorkspacePathValidationResult } from '@/shared/types.js';
 import { AppError, validateWorkspacePath } from '@/shared/utils.js';
 
 type CloneProjectInput = {
   workspacePath: string;
-  githubUrl: string;
-  githubTokenId?: number | null;
-  newGithubToken?: string | null;
+  repositoryUrl: string;
+  /**
+   * The forge the user picked for the repository. Null lets the URL decide; it
+   * only matters when a token is used, to know which host may receive it.
+   */
+  forge?: GitForge | null;
+  /** A stored GitHub or Forgejo token credential id. */
+  tokenId?: number | null;
+  /** A token typed in for this clone only. */
+  newToken?: string | null;
   userId: number | string;
+};
+
+/** A stored token with what it is valid for: a forge, and for Forgejo one instance. */
+type StoredForgeToken = {
+  token: string;
+  forge: GitForge;
+  instanceUrl: string | null;
 };
 
 type CloneCompletePayload = {
@@ -40,10 +60,12 @@ type CloneProjectDependencies = {
   ensureDirectory: (directoryPath: string) => Promise<void>;
   pathExists: (targetPath: string) => Promise<boolean>;
   removePath: (targetPath: string) => Promise<void>;
-  getGithubTokenById: (
-    tokenId: number,
+  getStoredTokenById: (tokenId: number, userId: number) => Promise<StoredForgeToken | null>;
+  resolveForge: (
+    repositoryUrl: string,
     userId: number,
-  ) => Promise<{ github_token: string } | null>;
+    forgeOverride: GitForge | null,
+  ) => Promise<ResolvedRepositoryForge | null>;
   spawnGitClone: (
     cloneUrl: string,
     clonePath: string,
@@ -69,41 +91,6 @@ async function defaultPathExists(targetPath: string): Promise<boolean> {
 
     throw error;
   }
-}
-
-/**
- * The only origin the credential helper answers for. The token is a GitHub
- * token; a helper that answered every challenge would hand it to whatever
- * host the clone URL names — and over plain http, in the clear.
- */
-const GITHUB_TOKEN_CREDENTIAL_SCOPE = 'credential.https://github.com.helper';
-
-/**
- * Builds the environment the clone runs in. The token never goes into the
- * clone URL: git echoes that URL on stderr (which is the SSE progress stream),
- * it sits in the process argv (readable through /proc) and it is written to the
- * cloned repo's `.git/config` as the remote. Instead env-only config points git
- * at a credential helper that reads the token from its own environment, so no
- * channel git exposes carries it. The empty first helper entry clears any
- * helper configured on the machine so a credential stored there cannot shadow
- * the one the user selected; the helper itself is scoped to github.com over
- * https, so a clone from any other host gets no credential at all.
- */
-function buildGitCloneEnvironment(githubToken: string | null): NodeJS.ProcessEnv {
-  if (!githubToken) {
-    return { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-  }
-
-  return {
-    ...process.env,
-    GIT_CONFIG_COUNT: '2',
-    GIT_CONFIG_KEY_0: 'credential.helper',
-    GIT_CONFIG_VALUE_0: '',
-    GIT_CONFIG_KEY_1: GITHUB_TOKEN_CREDENTIAL_SCOPE,
-    GIT_CONFIG_VALUE_1: '!f() { echo username=x-access-token; echo "password=$CLOUDCLI_GITHUB_TOKEN"; }; f',
-    CLOUDCLI_GITHUB_TOKEN: githubToken,
-    GIT_TERMINAL_PROMPT: '0',
-  };
 }
 
 function resolveCloneFailureMessage(lastError: string): string {
@@ -143,15 +130,18 @@ const defaultDependencies: CloneProjectDependencies = {
   removePath: async (targetPath: string): Promise<void> => {
     await rm(targetPath, { recursive: true, force: true });
   },
-  getGithubTokenById: async (
-    tokenId: number,
-    userId: number,
-  ): Promise<{ github_token: string } | null> => {
-    const tokenRow = githubTokensDb.getGithubTokenById(userId, tokenId) as
-      | { github_token: string }
-      | null;
-    return tokenRow;
+  getStoredTokenById: async (tokenId: number, userId: number): Promise<StoredForgeToken | null> => {
+    const githubToken = githubTokensDb.getGithubTokenById(userId, tokenId);
+    if (githubToken) {
+      return { token: githubToken.github_token, forge: 'github', instanceUrl: null };
+    }
+    const forgejoToken = forgejoTokensDb.getForgejoTokenById(userId, tokenId);
+    if (forgejoToken) {
+      return { token: forgejoToken.token, forge: 'forgejo', instanceUrl: forgejoToken.instanceUrl };
+    }
+    return null;
   },
+  resolveForge: resolveRepositoryForge,
   spawnGitClone: (
     cloneUrl: string,
     clonePath: string,
@@ -202,6 +192,80 @@ function isParsableUrl(url: string): boolean {
   }
 }
 
+function requireNumericUserId(userId: number | string): number {
+  const numericUserId = typeof userId === 'number' ? userId : Number.parseInt(String(userId), 10);
+  if (Number.isNaN(numericUserId)) {
+    throw new AppError('Authenticated user is required', {
+      code: 'AUTHENTICATION_REQUIRED',
+      statusCode: 401,
+    });
+  }
+  return numericUserId;
+}
+
+/**
+ * Builds the environment the clone runs in. Without a token git runs with
+ * prompts disabled and whatever access the machine has (public repos, SSH
+ * keys). With one, the forge decides which single https origin the token is
+ * offered to (see `buildTokenCredentialEnvironment`): github.com for a GitHub
+ * token, the repository's own instance for a Forgejo token. A stored token
+ * carries its forge; a typed one takes the forge the user picked, or the one
+ * detected from the URL.
+ */
+async function resolveCloneEnvironment(
+  input: CloneProjectInput,
+  repositoryUrl: string,
+  dependencies: CloneProjectDependencies,
+): Promise<NodeJS.ProcessEnv> {
+  let storedToken: StoredForgeToken | null = null;
+  let token: string | null = null;
+  if (typeof input.tokenId === 'number') {
+    storedToken = await dependencies.getStoredTokenById(input.tokenId, requireNumericUserId(input.userId));
+    if (!storedToken) {
+      throw new AppError('Token not found', {
+        code: 'FORGE_TOKEN_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    token = storedToken.token;
+  } else if (input.newToken && input.newToken.trim().length > 0) {
+    token = input.newToken.trim();
+  }
+
+  if (!token) {
+    return { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  }
+
+  const resolved = await dependencies.resolveForge(
+    repositoryUrl,
+    requireNumericUserId(input.userId),
+    storedToken?.forge ?? input.forge ?? null,
+  );
+  if (!resolved?.forge) {
+    throw new AppError(
+      'Could not tell whether this repository is hosted on GitHub or Forgejo. Choose the host, or clone without a token.',
+      { code: 'FORGE_UNDETECTED', statusCode: 400 },
+    );
+  }
+
+  if (storedToken?.instanceUrl && resolved.instanceUrl !== storedToken.instanceUrl) {
+    throw new AppError(
+      `This token belongs to ${storedToken.instanceUrl}, but the repository is on ${resolved.instanceUrl ?? resolved.repository.webOrigin}.`,
+      { code: 'FORGE_TOKEN_INSTANCE_MISMATCH', statusCode: 400 },
+    );
+  }
+
+  const credentialOrigin = getTokenCredentialOrigin(resolved.forge, resolved.repository);
+  if (!credentialOrigin) {
+    throw new AppError('A Forgejo token is only sent over https. Use an https URL, or clone without a token.', {
+      code: 'FORGE_TOKEN_REQUIRES_HTTPS',
+      statusCode: 400,
+    });
+  }
+
+  return buildTokenCredentialEnvironment(token, credentialOrigin);
+}
+
 export async function startCloneProject(
   input: CloneProjectInput,
   handlers: CloneProjectEventHandlers,
@@ -209,25 +273,25 @@ export async function startCloneProject(
 ): Promise<CloneProjectOperation> {
   const dependencies = { ...defaultDependencies, ...dependencyOverrides };
   const normalizedWorkspacePath = input.workspacePath.trim();
-  const normalizedGithubUrl = input.githubUrl.trim();
+  const normalizedRepositoryUrl = input.repositoryUrl.trim();
 
   if (!normalizedWorkspacePath) {
-    throw new AppError('workspacePath and githubUrl are required', {
+    throw new AppError('workspacePath and repositoryUrl are required', {
       code: 'WORKSPACE_PATH_REQUIRED',
       statusCode: 400,
     });
   }
 
-  if (!normalizedGithubUrl) {
-    throw new AppError('workspacePath and githubUrl are required', {
-      code: 'GITHUB_URL_REQUIRED',
+  if (!normalizedRepositoryUrl) {
+    throw new AppError('workspacePath and repositoryUrl are required', {
+      code: 'REPOSITORY_URL_REQUIRED',
       statusCode: 400,
     });
   }
 
-  if (normalizedGithubUrl.startsWith('-')) {
-    throw new AppError('Invalid githubUrl', {
-      code: 'INVALID_GITHUB_URL',
+  if (normalizedRepositoryUrl.startsWith('-')) {
+    throw new AppError('Invalid repositoryUrl', {
+      code: 'INVALID_REPOSITORY_URL',
       statusCode: 400,
     });
   }
@@ -235,18 +299,18 @@ export async function startCloneProject(
   // An http(s) string the URL parser rejects (a bad port, a space in the
   // host) is one curl rejects too — but only after git has carried it, and
   // any credential in it, on its command line.
-  if (/^https?:/i.test(normalizedGithubUrl) && !isParsableUrl(normalizedGithubUrl)) {
-    throw new AppError('Invalid githubUrl', {
-      code: 'INVALID_GITHUB_URL',
+  if (/^https?:/i.test(normalizedRepositoryUrl) && !isParsableUrl(normalizedRepositoryUrl)) {
+    throw new AppError('Invalid repositoryUrl', {
+      code: 'INVALID_REPOSITORY_URL',
       statusCode: 400,
     });
   }
 
-  if (carriesCredentials(normalizedGithubUrl)) {
+  if (carriesCredentials(normalizedRepositoryUrl)) {
     // The token field is the only way in: a credential in the URL would ride
     // git's argv, its stderr and the clone's `.git/config`.
     throw new AppError('Put the token in the token field, not in the URL', {
-      code: 'GITHUB_URL_CARRIES_CREDENTIALS',
+      code: 'REPOSITORY_URL_CARRIES_CREDENTIALS',
       statusCode: 400,
     });
   }
@@ -262,32 +326,10 @@ export async function startCloneProject(
   const absolutePath = pathValidation.resolvedPath;
   await dependencies.ensureDirectory(absolutePath);
 
-  let githubToken: string | null = null;
-  if (typeof input.githubTokenId === 'number') {
-    const numericUserId =
-      typeof input.userId === 'number' ? input.userId : Number.parseInt(String(input.userId), 10);
-    if (Number.isNaN(numericUserId)) {
-      throw new AppError('Authenticated user is required', {
-        code: 'AUTHENTICATION_REQUIRED',
-        statusCode: 401,
-      });
-    }
+  const cloneEnvironment = await resolveCloneEnvironment(input, normalizedRepositoryUrl, dependencies);
 
-    const token = await dependencies.getGithubTokenById(input.githubTokenId, numericUserId);
-    if (!token) {
-      throw new AppError('GitHub token not found', {
-        code: 'GITHUB_TOKEN_NOT_FOUND',
-        statusCode: 404,
-      });
-    }
-
-    githubToken = token.github_token;
-  } else if (input.newGithubToken && input.newGithubToken.trim().length > 0) {
-    githubToken = input.newGithubToken.trim();
-  }
-
-  const sanitizedGithubUrl = normalizedGithubUrl.replace(/\/+$/, '').replace(/\.git$/, '');
-  const repoName = sanitizedGithubUrl.split('/').pop() || 'repository';
+  const sanitizedRepositoryUrl = normalizedRepositoryUrl.replace(/\/+$/, '').replace(/\.git$/, '');
+  const repoName = sanitizedRepositoryUrl.split('/').pop() || 'repository';
   const clonePath = path.join(absolutePath, repoName);
 
   if (await dependencies.pathExists(clonePath)) {
@@ -302,9 +344,9 @@ export async function startCloneProject(
 
   handlers.onProgress(`Cloning into '${repoName}'...`);
   const gitProcess = dependencies.spawnGitClone(
-    normalizedGithubUrl,
+    normalizedRepositoryUrl,
     clonePath,
-    buildGitCloneEnvironment(githubToken),
+    cloneEnvironment,
   );
   let lastError = '';
 
