@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '@/shared/api';
+import { FORGE_CREDENTIAL_TYPES } from '@/shared/constants';
 import type { ForgeCredentialItem, GitForge } from '@/shared/types';
 
 type ForgeCredentialsResponse = {
@@ -12,12 +13,6 @@ type ForgeCredentialsResponse = {
 type UseForgeCredentialsArgs = {
   forge: GitForge;
   confirmDeleteText: string;
-};
-
-/** The credential type each forge's tokens are stored under. */
-const CREDENTIAL_TYPES: Record<GitForge, string> = {
-  github: 'github_token',
-  forgejo: 'forgejo_token',
 };
 
 const getApiError = (payload: ForgeCredentialsResponse | undefined, fallback: string) => {
@@ -36,7 +31,7 @@ const getApiError = (payload: ForgeCredentialsResponse | undefined, fallback: st
  * was issued by; the server validates it and reports why it was refused.
  */
 export function useForgeCredentials({ forge, confirmDeleteText }: UseForgeCredentialsArgs) {
-  const credentialType = CREDENTIAL_TYPES[forge];
+  const credentialType = FORGE_CREDENTIAL_TYPES[forge];
 
   // The stored tokens of this forge, as listed by the server (never the secrets).
   const [credentials, setCredentials] = useState<ForgeCredentialItem[]>([]);

@@ -34,12 +34,14 @@ type HookProps = {
   repositoryUrl: string;
   instanceUrl: string | null;
   selectedTokenId: string;
+  detecting?: boolean;
 };
 
 const renderTokens = (initialProps: HookProps) => {
   const selections: string[] = [];
   const hook = renderHook((props: HookProps) => useForgeTokens({
     ...props,
+    detecting: props.detecting ?? false,
     shouldLoad: true,
     onAutoSelectToken: (tokenId) => { selections.push(tokenId); },
   }), { initialProps });
@@ -83,4 +85,18 @@ test('an unrecognised host is offered no stored token', async () => {
   await waitFor(() => assert.equal(result.current.loading, false));
   assert.deepEqual(result.current.tokens, []);
   assert.deepEqual(selections, []);
+});
+
+test('a selection survives while the edited URL is being detected again', async () => {
+  const codeberg = { forge: 'forgejo' as const, instanceUrl: 'https://codeberg.org', selectedTokenId: '2' };
+  const { result, rerender, selections } = renderTokens({ ...codeberg, repositoryUrl: 'https://codeberg.org/team/rep' });
+  await waitFor(() => assert.deepEqual(result.current.tokens.map((token) => token.id), [2]));
+
+  // Mid-detection the host can read as unknown; the choice must not be dropped.
+  rerender({ ...codeberg, forge: null, instanceUrl: null, repositoryUrl: 'https://codeberg.org/team/repo', detecting: true });
+  rerender({ ...codeberg, repositoryUrl: 'https://codeberg.org/team/repo', detecting: false });
+
+  await waitFor(() => assert.deepEqual(result.current.tokens.map((token) => token.id), [2]));
+  assert.deepEqual(selections, []);
+  assert.equal(result.current.selectedTokenName, 'Codeberg');
 });

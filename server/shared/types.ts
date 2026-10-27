@@ -1000,6 +1000,10 @@ export type GitForge = 'github' | 'forgejo';
  * - `basePath` is a sub-path install prefix (`/forgejo` in
  *   `https://example.com/forgejo/owner/repo`), or `''`. Always `''` for ssh.
  * - `host` is lowercased and excludes the port.
+ * - `webPagePath` is the part after `owner/repo` when the URL is a link to a
+ *   page of the repository copied from the browser (`/tree/main`,
+ *   `/src/branch/main`), or `''` for a plain repository URL. git cannot clone
+ *   a page URL, so the clone paths reject one and suggest the repository URL.
  */
 export type ParsedRepositoryUrl = {
   transport: 'https' | 'http' | 'ssh';
@@ -1008,6 +1012,7 @@ export type ParsedRepositoryUrl = {
   basePath: string;
   owner: string;
   repo: string;
+  webPagePath: string;
 };
 
 // ---------------------------

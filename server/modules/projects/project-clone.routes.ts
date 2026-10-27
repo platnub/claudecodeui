@@ -1,33 +1,16 @@
-import express, { type Request } from 'express';
+import express from 'express';
 
 import type {
   PendingCloneRequest,
   PendingCloneRequests,
 } from '@/modules/projects/services/project-clone-request.service.js';
 import type { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
-import { AppError, asyncHandler } from '@/shared/utils.js';
+import { AppError, asyncHandler, requireAuthenticatedUserId } from '@/shared/utils.js';
 
 type ProjectCloneRouterDependencies = {
   startCloneProject: typeof startCloneProject;
   pendingCloneRequests: PendingCloneRequests;
 };
-
-type AuthenticatedUser = {
-  id?: number | string;
-};
-
-function requireAuthenticatedUserId(req: Request): number | string {
-  const authenticatedUser = (req as Request & { user?: AuthenticatedUser }).user;
-  const userId = authenticatedUser?.id;
-  if (userId === undefined || userId === null) {
-    throw new AppError('Authenticated user is required', {
-      code: 'AUTHENTICATION_REQUIRED',
-      statusCode: 401,
-    });
-  }
-
-  return userId;
-}
 
 function optionalString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;

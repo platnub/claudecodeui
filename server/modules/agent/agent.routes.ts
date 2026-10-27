@@ -6,6 +6,7 @@ import express from 'express';
 import {
   buildTokenCredentialEnvironment,
   getBranchWebUrl,
+  getRepositoryWebUrl,
   getTokenCredentialOrigin,
   parseRepositoryUrl,
 } from '@/modules/forges/index.js';
@@ -198,9 +199,27 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
   }
 
   /**
+   * Rejects a forge that cannot be the repository's host: GitHub lives only on
+   * github.com, and github.com is never a Forgejo instance. Detection never
+   * pairs them wrongly, but a caller's `forge` override can — and the token
+   * and the pull request would then go to a different host than the remote.
+   * Runs before cloning and before pushing a branch.
+   * @param {{forge: 'github'|'forgejo'|null, repository: {host: string}}} resolved - From resolveRepositoryForge
+   */
+  function assertForgeMatchesHost(resolved) {
+    if (resolved.forge === 'github' && resolved.repository.host !== 'github.com') {
+      throw new Error('Invalid GitHub URL');
+    }
+    if (resolved.forge === 'forgejo' && resolved.repository.host === 'github.com') {
+      throw new Error('github.com is GitHub, not a Forgejo instance');
+    }
+  }
+
+  /**
    * Validates a clone URL and resolves its forge before git or a credential
-   * is involved: https only, no credentials in the URL, and a host that is
-   * GitHub or a Forgejo instance.
+   * is involved: https only, no credentials in the URL, a link to the
+   * repository rather than one of its pages, and a host that is GitHub or a
+   * Forgejo instance.
    * @param {string} repositoryUrl - The URL to clone
    * @param {'github'|'forgejo'|null} forgeOverride - The forge the caller named, if any
    * @param {number} userId - The authenticated user (whose stored instances count as Forgejo)
@@ -222,12 +241,12 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
     if (!resolved) {
       throw new Error('Invalid repository URL');
     }
-    if (resolved.forge === 'github' && resolved.repository.host !== 'github.com') {
-      throw new Error('Invalid GitHub URL');
+    if (resolved.repository.webPagePath) {
+      throw new Error(
+        `This is a link to a page of the repository, not the repository itself. Use ${getRepositoryWebUrl(resolved.repository)}`,
+      );
     }
-    if (resolved.forge === 'forgejo' && resolved.repository.host === 'github.com') {
-      throw new Error('github.com is GitHub, not a Forgejo instance');
-    }
+    assertForgeMatchesHost(resolved);
     if (!resolved.forge) {
       throw new Error('Unsupported repository host: only GitHub and Forgejo repositories can be cloned');
     }
@@ -644,8 +663,10 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
    *
    * @param {string} forge - (Optional) 'github' | 'forgejo'. Overrides detection. Omitted: github.com is
    *                         GitHub; codeberg.org and any instance you stored a Forgejo token for are Forgejo;
-   *                         any other host is asked for Forgejo's version endpoint. A host that is neither
-   *                         cannot be cloned, or receive a branch/PR.
+   *                         any other host is asked for Forgejo's version endpoint, except localhost and
+   *                         private IP addresses, which are never probed. A host that is neither cannot be
+   *                         cloned, or receive a branch/PR. An override must match the host: 'github' only
+   *                         for github.com, 'forgejo' never for it.
    *
    * @param {string} projectPath - (Conditionally Required) Path to existing project OR destination for cloning.
    *                               Behavior depends on usage:
@@ -1168,6 +1189,9 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
           if (!resolvedRemote?.forge) {
             throw new Error('Project does not have a GitHub or Forgejo remote configured');
           }
+          // Before the push: an override naming the wrong forge must not send
+          // the branch to the remote and the pull request somewhere else.
+          assertForgeMatchesHost(resolvedRemote);
           forge = resolvedRemote.forge;
           const { repository, instanceUrl } = resolvedRemote;
           const { owner, repo } = repository;

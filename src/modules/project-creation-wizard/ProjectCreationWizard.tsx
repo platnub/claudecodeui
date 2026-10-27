@@ -65,6 +65,7 @@ export default function ProjectCreationWizard({
     forge: effectiveForge,
     repositoryUrl: formState.repositoryUrl,
     instanceUrl: effectiveForge === 'forgejo' ? detected.instanceUrl : null,
+    detecting: detectingForge,
     selectedTokenId: formState.selectedToken,
     onAutoSelectToken: autoSelectToken,
   });
@@ -96,7 +97,14 @@ export default function ProjectCreationWizard({
     setStep((previousStep) => (previousStep > 1 ? ((previousStep - 1) as WizardStep) : previousStep));
   }, []);
 
+  // A clone waits for detection to settle: until then the forge (and so the
+  // token sent with the clone) may still be the one of the URL before the edit.
+  const isWaitingForHost = isCloneWorkflow(formState.repositoryUrl) && detectingForge;
+
   const handleCreate = useCallback(async () => {
+    if (isWaitingForHost) {
+      return;
+    }
     setIsCreating(true);
     setError(null);
     setCloneProgress('');
@@ -142,7 +150,7 @@ export default function ProjectCreationWizard({
     } finally {
       setIsCreating(false);
     }
-  }, [effectiveForge, formState, onClose, onProjectCreated, t]);
+  }, [effectiveForge, formState, isWaitingForHost, onClose, onProjectCreated, t]);
 
   const shouldCloneRepository = useMemo(
     () => isCloneWorkflow(formState.repositoryUrl),
@@ -206,6 +214,7 @@ export default function ProjectCreationWizard({
             <StepReview
               formState={formState}
               effectiveForge={effectiveForge}
+              detectingForge={detectingForge}
               selectedTokenName={selectedTokenName}
               isCreating={isCreating}
               cloneProgress={cloneProgress}
@@ -216,6 +225,7 @@ export default function ProjectCreationWizard({
         <WizardFooter
           step={step}
           isCreating={isCreating}
+          isWaitingForHost={isWaitingForHost}
           isCloneWorkflow={shouldCloneRepository}
           onClose={onClose}
           onBack={handleBack}

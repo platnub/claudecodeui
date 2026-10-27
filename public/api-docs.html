@@ -465,7 +465,7 @@
                         <p>A Forgejo token belongs to one instance (for example <code>https://codeberg.org</code>), so it is stored together with that instance's URL and only ever sent to it, over https.</p>
 
                         <div class="note">
-                            <strong>Note:</strong> Tokens in the request override stored tokens. The repository host is detected automatically: <code>github.com</code> is GitHub; <code>codeberg.org</code>, any instance you stored a Forgejo token for, and any host that answers Forgejo's version API are Forgejo. Pass <code>forge</code> to override detection.
+                            <strong>Note:</strong> Tokens in the request override stored tokens. The repository host is detected automatically: <code>github.com</code> is GitHub; <code>codeberg.org</code>, any instance you stored a Forgejo token for, and any host that answers Forgejo's version API are Forgejo. <code>localhost</code> and private IP addresses are never probed. Pass <code>forge</code> to override detection (it must match the host: <code>github</code> only for github.com, <code>forgejo</code> never for it). Links to a page of a repository (<code>.../tree/main</code>, <code>.../src/branch/main</code>) are refused; use the repository URL.
                         </div>
                     </section>
                 </div>

@@ -7,6 +7,8 @@ import type { WizardStep } from '@/shared/types';
 type WizardFooterProps = {
   step: WizardStep;
   isCreating: boolean;
+  /** True while the repository host is still being detected; creating waits for it. */
+  isWaitingForHost: boolean;
   isCloneWorkflow: boolean;
   onClose: () => void;
   onBack: () => void;
@@ -18,6 +20,7 @@ type WizardFooterProps = {
 export default function WizardFooter({
   step,
   isCreating,
+  isWaitingForHost,
   isCloneWorkflow,
   onClose,
   onBack,
@@ -39,7 +42,10 @@ export default function WizardFooter({
         )}
       </Button>
 
-      <Button onClick={step === 2 ? onCreate : onNext} disabled={isCreating}>
+      <Button
+        onClick={step === 2 ? onCreate : onNext}
+        disabled={isCreating || (step === 2 && isWaitingForHost)}
+      >
         {isCreating ? (
           <>
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />

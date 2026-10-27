@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 import { forgejoTokensDb } from '@/modules/database/index.js';
 import {
   normalizeForgejoInstanceUrl,
@@ -17,6 +19,63 @@ const PROBE_CACHE_TTL_MS = 10 * 60 * 1000;
 
 /** How long one probe request may take before the host counts as "not Forgejo". */
 const PROBE_TIMEOUT_MS = 4000;
+
+/**
+ * How many instance answers the probe cache holds. Every distinct host a user
+ * types adds one, so the oldest is dropped past this.
+ */
+const PROBE_CACHE_MAX_ENTRIES = 256;
+
+/** Whether a dotted IPv4 address is loopback, private, link-local, CGNAT or unspecified. */
+function isNonPublicIpv4(address: string): boolean {
+  const [first, second] = address.split('.').map(Number);
+  return first === 0
+    || first === 10
+    || first === 127
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168);
+}
+
+/**
+ * Whether `host` names this machine or a private network: `localhost`, or an
+ * IP literal in a loopback, private, link-local (cloud metadata) or
+ * unspecified range. Such hosts are never probed, so the detect endpoint
+ * cannot be pointed at internal services. The host goes through the URL
+ * parser first, so `2130706433` or `0x7f.1` count as the 127.0.0.1 they are.
+ * A DNS name is not resolved: a self-hosted instance on the LAN under a name
+ * is still probed, and one reached by IP is recognised once the user stores a
+ * token for it or picks Forgejo explicitly.
+ */
+function isNonPublicHost(host: string): boolean {
+  let hostname: string;
+  try {
+    // IPv6 hosts arrive bracketed (`[::1]`), as the URL parser reports them.
+    hostname = new URL(`https://${host}`).hostname;
+  } catch {
+    return true;
+  }
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
+    return true;
+  }
+
+  const bareHostname = hostname.replace(/^\[|\]$/g, '');
+  const ipVersion = isIP(bareHostname);
+  if (ipVersion === 4) {
+    return isNonPublicIpv4(bareHostname);
+  }
+  if (ipVersion === 6) {
+    // IPv4-mapped (`::ffff:7f00:1`, as the parser writes it) is never a
+    // forge's public address; refusing all of it covers every mapped range.
+    return /^::ffff:/i.test(bareHostname)
+      || bareHostname === '::'
+      || bareHostname === '::1'
+      || /^f[cd]/i.test(bareHostname)
+      || /^fe[89ab]/i.test(bareHostname);
+  }
+  return false;
+}
 
 /** Asks an instance URL whether it is Forgejo; resolves false on any failure. */
 type ForgejoProbe = (instanceUrl: string) => Promise<boolean>;
@@ -53,8 +112,10 @@ async function answersVersionEndpoint(instanceUrl: string, apiPath: string): Pro
  * `/api/v1/version` is the older endpoint Forgejo shares with Gitea, whose
  * pull-request API is the same, so either answer means "Forgejo-compatible".
  *
- * The request goes to whatever host the user typed. That is no more than the
- * clone that follows does, and only authenticated users can trigger it.
+ * The request goes to the host the user typed, which only authenticated users
+ * can do — but never to this machine or a private address
+ * (`isNonPublicHost`), since detection runs while the user is still typing
+ * and for ssh URLs, where the clone itself makes no HTTP request.
  */
 async function probeForgejoInstance(instanceUrl: string): Promise<boolean> {
   if (await answersVersionEndpoint(instanceUrl, '/api/forgejo/v1/version')) {
@@ -67,9 +128,11 @@ async function probeForgejoInstance(instanceUrl: string): Promise<boolean> {
  * Creates a detector that tells which forge a repository URL lives on.
  *
  * Order: github.com is GitHub; well-known and user-configured (a stored
- * Forgejo token names its instance) hosts are Forgejo; anything else is
- * probed over the network once per instance and cached. Unrecognised hosts
- * and unparsable URLs resolve to null.
+ * Forgejo token names its instance) hosts are Forgejo; localhost and private
+ * IP addresses are not probed and resolve to null; anything else is probed
+ * over the network once per instance and cached (the oldest of
+ * `PROBE_CACHE_MAX_ENTRIES` answers is dropped first). Unrecognised hosts and
+ * unparsable URLs resolve to null.
  *
  * Exported for this module's tests, which inject a probe.
  */
@@ -100,6 +163,9 @@ export function createForgeDetector(
       if (normalizedKnownUrls.includes(instanceUrl)) {
         return 'forgejo';
       }
+      if (isNonPublicHost(repository.host)) {
+        return null;
+      }
 
       const cached = probeCache.get(instanceUrl);
       if (cached && cached.expiresAt > now()) {
@@ -107,6 +173,11 @@ export function createForgeDetector(
       }
 
       const isForgejo = await probe(instanceUrl);
+      // Re-inserting moves the entry to the end, so the first key is the oldest.
+      probeCache.delete(instanceUrl);
+      if (probeCache.size >= PROBE_CACHE_MAX_ENTRIES) {
+        probeCache.delete(probeCache.keys().next().value as string);
+      }
       probeCache.set(instanceUrl, { isForgejo, expiresAt: now() + PROBE_CACHE_TTL_MS });
       return isForgejo ? 'forgejo' : null;
     },

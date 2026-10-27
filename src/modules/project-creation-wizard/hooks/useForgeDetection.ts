@@ -10,7 +10,8 @@ const UNDETECTED: ForgeDetectionResult = { forge: null, instanceUrl: null };
 
 /**
  * Asks the server which forge the repository URL lives on while the user
- * types, debounced, and keeps only the answer for the URL currently entered.
+ * types, debounced. Reports the latest answer, and `detecting` until the
+ * answer is for the URL currently entered.
  */
 export const useForgeDetection = (repositoryUrl: string, enabled: boolean) => {
   // The latest answer, tagged with the URL it is for so a stale answer is never shown.
@@ -41,10 +42,14 @@ export const useForgeDetection = (repositoryUrl: string, enabled: boolean) => {
     };
   }, [enabled, trimmedUrl]);
 
+  const isActive = enabled && trimmedUrl.length > 0;
   const hasAnswer = detection?.url === trimmedUrl;
   return {
-    detected: hasAnswer ? detection.result : UNDETECTED,
+    // While the edited URL is being asked about, the last answer stands in so
+    // the authentication card and its tokens do not vanish on each keystroke.
+    // It may be stale until `detecting` clears: nothing may act on it before.
+    detected: isActive && detection ? detection.result : UNDETECTED,
     // Pending until an answer for exactly this URL has arrived.
-    detecting: enabled && trimmedUrl.length > 0 && !hasAnswer,
+    detecting: isActive && !hasAnswer,
   };
 };

@@ -188,6 +188,25 @@ test('startCloneProject rejects an http(s) URL the parser cannot read before git
   assert.equal(spawned, 0);
 });
 
+test('startCloneProject refuses a link to a repository page and names the repository URL', async () => {
+  let spawned = 0;
+  await assert.rejects(
+    async () =>
+      startCloneProject(
+        { workspacePath: '/workspace/root', repositoryUrl: 'https://codeberg.org/team/repo/src/branch/main', userId: 1 },
+        { onProgress: () => undefined, onComplete: () => undefined },
+        buildDependencies({ spawnGitClone: () => { spawned += 1; throw new Error('must not spawn'); } }),
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof AppError);
+      assert.equal(error.code, 'REPOSITORY_URL_IS_WEB_PAGE');
+      assert.match(error.message, /Use https:\/\/codeberg\.org\/team\/repo$/);
+      return true;
+    },
+  );
+  assert.equal(spawned, 0);
+});
+
 test('startCloneProject accepts the ssh login name that is not a credential', async () => {
   // `git@` on an SSH URL is the login every SSH clone uses, not a secret.
   const gitProcess = createMockGitProcess();

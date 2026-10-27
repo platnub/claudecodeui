@@ -7,6 +7,7 @@ export type { ResolvedRepositoryForge } from './forge-detection.service.js';
 export { buildTokenCredentialEnvironment, getTokenCredentialOrigin } from './git-credentials.service.js';
 // createForgejoPullRequest / getBranchWebUrl: used by the agent module to open Forgejo pull requests and link pushed branches.
 export { createForgejoPullRequest, getBranchWebUrl } from './forgejo-api.service.js';
-// parseRepositoryUrl / getRepositoryWebUrl: used by the agent module to compare checkouts and name the repository a PR goes to.
+// parseRepositoryUrl / getRepositoryWebUrl: used by the agent module to compare checkouts and name the repository a PR goes to,
+// and by both the agent module and the projects clone service to refuse a link to a repository page and suggest the repository URL.
 // normalizeForgejoInstanceUrl: used by the settings module to validate the instance URL of a Forgejo token.
 export { getRepositoryWebUrl, normalizeForgejoInstanceUrl, parseRepositoryUrl } from './repository-url.service.js';

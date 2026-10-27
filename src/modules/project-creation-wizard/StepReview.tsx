@@ -8,6 +8,8 @@ type StepReviewProps = {
   formState: WizardFormState;
   /** The forge the clone will use, or null when the host is neither GitHub nor Forgejo. */
   effectiveForge: GitForge | null;
+  /** True while the host is still being detected, so `effectiveForge` may be stale. */
+  detectingForge: boolean;
   selectedTokenName: string | null;
   isCreating: boolean;
   cloneProgress: string;
@@ -17,6 +19,7 @@ type StepReviewProps = {
 export default function StepReview({
   formState,
   effectiveForge,
+  detectingForge,
   selectedTokenName,
   isCreating,
   cloneProgress,
@@ -38,6 +41,19 @@ export default function StepReview({
 
     return t('projectWizard.step3.noAuthentication');
   }, [formState, selectedTokenName, t]);
+
+  const hostLabel = (() => {
+    if (detectingForge) {
+      return t('projectWizard.step2.forgeDetecting');
+    }
+    if (effectiveForge === 'github') {
+      return t('projectWizard.step2.forgeGithub');
+    }
+    if (effectiveForge === 'forgejo') {
+      return t('projectWizard.step2.forgeForgejo');
+    }
+    return t('projectWizard.step3.otherHost');
+  })();
 
   return (
     <div className="space-y-4">
@@ -70,11 +86,7 @@ export default function StepReview({
                   {t('projectWizard.step3.host')}
                 </span>
                 <span className="text-xs text-gray-900 dark:text-white">
-                  {effectiveForge === 'github'
-                    ? t('projectWizard.step2.forgeGithub')
-                    : effectiveForge === 'forgejo'
-                      ? t('projectWizard.step2.forgeForgejo')
-                      : t('projectWizard.step3.otherHost')}
+                  {hostLabel}
                 </span>
               </div>
 

@@ -13,6 +13,8 @@ type UseForgeTokensParams = {
   repositoryUrl: string;
   /** The Forgejo instance the server matched the URL to, when it did. */
   instanceUrl: string | null;
+  /** True while `forge` and `instanceUrl` may still describe the URL before the last edit. */
+  detecting: boolean;
   selectedTokenId: string;
   onAutoSelectToken: (tokenId: string) => void;
 };
@@ -37,13 +39,15 @@ const belongsToInstance = (
  * Loads the user's stored GitHub and Forgejo tokens once, and offers only the
  * ones that can authenticate the current repository: GitHub tokens for GitHub,
  * Forgejo tokens of the matching instance for Forgejo, none for an unknown host.
- * Keeps the selection valid as the URL or forge changes.
+ * Keeps the selection valid as the URL or forge changes, once detection has
+ * settled: a pending answer must not clear a choice the new one still offers.
  */
 export const useForgeTokens = ({
   shouldLoad,
   forge,
   repositoryUrl,
   instanceUrl,
+  detecting,
   selectedTokenId,
   onAutoSelectToken,
 }: UseForgeTokensParams) => {
@@ -105,7 +109,7 @@ export const useForgeTokens = ({
 
   // A token picked for one host must not stay selected for another.
   useEffect(() => {
-    if (!hasLoaded) {
+    if (!hasLoaded || detecting) {
       return;
     }
     const selectionIsAvailable = tokens.some((token) => String(token.id) === selectedTokenId);
@@ -115,7 +119,7 @@ export const useForgeTokens = ({
     if (nextTokenId !== selectedTokenId) {
       onAutoSelectToken(nextTokenId);
     }
-  }, [hasLoaded, onAutoSelectToken, selectedTokenId, tokens]);
+  }, [detecting, hasLoaded, onAutoSelectToken, selectedTokenId, tokens]);
 
   const selectedTokenName = useMemo(
     () => tokens.find((token) => String(token.id) === selectedTokenId)?.credential_name || null,

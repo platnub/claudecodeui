@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import type { ComponentType } from 'react';
 
-import type { FileStatusCode, LLMProvider, McpProvider, McpScope, McpTransport, SettingsMainTab } from '@/shared/types';
+import type { FileStatusCode, GitForge, LLMProvider, McpProvider, McpScope, McpTransport, SettingsMainTab } from '@/shared/types';
 import type { UserPreferenceKey } from '@/shared/userSettings';
 
 /** The four buckets the git changes view sorts working-tree files into. */
@@ -217,4 +217,19 @@ export const PROVIDER_PERMISSION_PREFERENCE_KEYS: Record<LLMProvider, UserPrefer
   cursor: 'cursorPermissions',
   codex: 'codexPermissions',
   opencode: 'opencodePermissions',
+};
+
+// ---------------------------
+
+//----------------- FORGE CREDENTIAL TYPES ------------
+
+/**
+ * The `credential_type` each forge's stored tokens are saved under in the
+ * credentials API. The settings tab lists and creates tokens of one forge by
+ * it; the project wizard loads both kinds and filters them by the forge the
+ * repository resolves to.
+ */
+export const FORGE_CREDENTIAL_TYPES: Record<GitForge, string> = {
+  github: 'github_token',
+  forgejo: 'forgejo_token',
 };

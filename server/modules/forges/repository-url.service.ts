@@ -11,14 +11,43 @@ const SCHEME_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//i;
  */
 const SCP_LIKE_PATTERN = /^(?:[^@/\s]+@)?([^:/\s]+):(.+)$/;
 
+/** Web-UI routes that follow `owner/repo` and need at least one more segment: GitHub's `tree/<ref>`, `blob/<ref>/...`, `commit/<sha>`. */
+const WEB_PAGE_ROUTES = new Set(['tree', 'blob', 'commit', 'commits']);
+
+/** Forgejo's `src/<kind>/<ref>` page routes. */
+const FORGEJO_SOURCE_ROUTE_KINDS = new Set(['branch', 'commit', 'tag']);
+
+/**
+ * The index of the first segment of a web-UI page route (`tree/main`,
+ * `src/branch/main`) in an http(s) path, or -1. Only indexes from 2 count, so
+ * at least `owner/repo` precede it; a sub-path install keeps its prefix.
+ */
+function findWebPageRouteIndex(segments: string[]): number {
+  for (let index = 2; index < segments.length; index += 1) {
+    if (WEB_PAGE_ROUTES.has(segments[index]) && index + 1 < segments.length) {
+      return index;
+    }
+    if (
+      segments[index] === 'src'
+      && FORGEJO_SOURCE_ROUTE_KINDS.has(segments[index + 1])
+      && index + 2 < segments.length
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
 /**
  * Parses a git remote URL into forge-relevant parts, or returns null for
  * anything that is not a recognisable `owner/repo` remote (a bare path, a
- * file:// URL, a URL with only one path segment).
+ * file:// URL, a URL with only one path segment). A link to a page of the
+ * repository parses to that repository, with the page in `webPagePath`.
  *
  * Used by forge detection and Forgejo API calls in this module, by the
- * projects module's clone service to scope a token to the repository's host,
- * and by the agent module to find where to open a pull request.
+ * projects module's clone service to refuse page links and scope a token to
+ * the repository's host, and by the agent module to find where to open a pull
+ * request.
  */
 export function parseRepositoryUrl(url: string): ParsedRepositoryUrl | null {
   const trimmedUrl = url.trim();
@@ -61,14 +90,20 @@ export function parseRepositoryUrl(url: string): ParsedRepositoryUrl | null {
     pathName = decodeURIComponent(parsedUrl.pathname);
   }
 
-  const segments = pathName
+  const allSegments = pathName
     .replace(/\/+$/, '')
     .replace(/\.git$/, '')
     .split('/')
     .filter(Boolean);
-  if (!host || segments.length < 2) {
+  if (!host || allSegments.length < 2) {
     return null;
   }
+
+  // A link to a page of the repository (copied from the browser) still names
+  // the repository: everything from the route on is the page, not a sub-path.
+  const webPageRouteIndex = transport === 'ssh' ? -1 : findWebPageRouteIndex(allSegments);
+  const segments = webPageRouteIndex === -1 ? allSegments : allSegments.slice(0, webPageRouteIndex);
+  const webPagePath = webPageRouteIndex === -1 ? '' : `/${allSegments.slice(webPageRouteIndex).join('/')}`;
 
   const repo = segments[segments.length - 1];
   const owner = segments[segments.length - 2];
@@ -77,7 +112,7 @@ export function parseRepositoryUrl(url: string): ParsedRepositoryUrl | null {
     ? ''
     : `/${segments.slice(0, -2).join('/')}`;
 
-  return { transport, host, webOrigin, basePath, owner, repo };
+  return { transport, host, webOrigin, basePath, owner, repo, webPagePath };
 }
 
 /**

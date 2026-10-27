@@ -13,16 +13,16 @@ import {
 
 test('parseRepositoryUrl reads https, ssh:// and scp-like remotes', () => {
   assert.deepEqual(parseRepositoryUrl('https://github.com/Owner/Repo.git'), {
-    transport: 'https', host: 'github.com', webOrigin: 'https://github.com', basePath: '', owner: 'Owner', repo: 'Repo',
+    transport: 'https', host: 'github.com', webOrigin: 'https://github.com', basePath: '', owner: 'Owner', repo: 'Repo', webPagePath: '',
   });
   assert.deepEqual(parseRepositoryUrl('git@codeberg.org:team/project.git'), {
-    transport: 'ssh', host: 'codeberg.org', webOrigin: 'https://codeberg.org', basePath: '', owner: 'team', repo: 'project',
+    transport: 'ssh', host: 'codeberg.org', webOrigin: 'https://codeberg.org', basePath: '', owner: 'team', repo: 'project', webPagePath: '',
   });
   assert.deepEqual(parseRepositoryUrl('ssh://git@git.example.com:2222/team/project.git'), {
-    transport: 'ssh', host: 'git.example.com', webOrigin: 'https://git.example.com', basePath: '', owner: 'team', repo: 'project',
+    transport: 'ssh', host: 'git.example.com', webOrigin: 'https://git.example.com', basePath: '', owner: 'team', repo: 'project', webPagePath: '',
   });
   assert.deepEqual(parseRepositoryUrl('https://example.com:3000/forgejo/team/project/'), {
-    transport: 'https', host: 'example.com', webOrigin: 'https://example.com:3000', basePath: '/forgejo', owner: 'team', repo: 'project',
+    transport: 'https', host: 'example.com', webOrigin: 'https://example.com:3000', basePath: '/forgejo', owner: 'team', repo: 'project', webPagePath: '',
   });
 });
 
@@ -31,6 +31,27 @@ test('parseRepositoryUrl rejects what is not an owner/repo remote', () => {
   assert.equal(parseRepositoryUrl('https://github.com/just-owner'), null);
   assert.equal(parseRepositoryUrl('file:///srv/git/repo.git'), null);
   assert.equal(parseRepositoryUrl('C:\\projects\\repo'), null);
+});
+
+test('parseRepositoryUrl reads a link to a repository page as that repository', () => {
+  const forgejoPage = parseRepositoryUrl('https://codeberg.org/team/repo/src/branch/main');
+  assert.equal(forgejoPage?.owner, 'team');
+  assert.equal(forgejoPage?.repo, 'repo');
+  assert.equal(forgejoPage?.basePath, '');
+  assert.equal(forgejoPage?.webPagePath, '/src/branch/main');
+
+  const githubPage = parseRepositoryUrl('https://github.com/owner/repo/tree/feature/thing');
+  assert.equal(`${githubPage?.owner}/${githubPage?.repo}`, 'owner/repo');
+  assert.equal(githubPage?.webPagePath, '/tree/feature/thing');
+
+  const subPathPage = parseRepositoryUrl('https://example.com/forgejo/team/repo/src/commit/abc123');
+  assert.equal(getRepositoryWebUrl(subPathPage!), 'https://example.com/forgejo/team/repo');
+  assert.equal(subPathPage?.webPagePath, '/src/commit/abc123');
+
+  // A repository named like a route, or a route with nothing after it, is a plain repository URL.
+  assert.equal(parseRepositoryUrl('https://example.com/forgejo/team/tree')?.webPagePath, '');
+  assert.equal(parseRepositoryUrl('https://codeberg.org/team/src')?.repo, 'src');
+  assert.equal(parseRepositoryUrl('git@codeberg.org:team/repo/tree/main')?.webPagePath, '');
 });
 
 test('getRepositoryWebUrl keeps a sub-path install', () => {
@@ -93,6 +114,56 @@ test('the forge detector probes an unknown host once and caches the answer', asy
   currentTime += 11 * 60 * 1000;
   await detector.detect('https://git.example.com/team/repo.git');
   assert.equal(probed.length, 4);
+});
+
+test('the forge detector never probes localhost or private addresses', async () => {
+  const probed: string[] = [];
+  const detector = createForgeDetector(async (instanceUrl) => { probed.push(instanceUrl); return true; });
+
+  for (const url of [
+    'https://localhost/team/repo',
+    'http://localhost:3000/team/repo',
+    'https://api.localhost/team/repo',
+    'https://127.0.0.1/team/repo',
+    'https://2130706433/team/repo',
+    'git@2130706433:team/repo.git',
+    'https://169.254.169.254/latest/meta-data',
+    'https://10.0.0.5/team/repo',
+    'https://172.20.1.1/team/repo',
+    'https://192.168.1.10/team/repo',
+    'https://100.64.0.1/team/repo',
+    'https://0.0.0.0/team/repo',
+    'https://[::1]/team/repo',
+    'https://[fd00::1]/team/repo',
+    'https://[fe80::1]/team/repo',
+    'https://[::ffff:127.0.0.1]/team/repo',
+  ]) {
+    assert.equal(await detector.detect(url), null, url);
+  }
+  assert.deepEqual(probed, []);
+
+  // A stored instance is trusted without a probe, private address or not.
+  assert.equal(await detector.detect('https://192.168.1.10/team/repo', ['https://192.168.1.10']), 'forgejo');
+  // Public addresses are still probed.
+  assert.equal(await detector.detect('https://8.8.8.8/team/repo'), 'forgejo');
+  assert.equal(await detector.detect('https://172.32.0.1/team/repo'), 'forgejo');
+  assert.deepEqual(probed, ['https://8.8.8.8', 'https://172.32.0.1']);
+});
+
+test('the forge detector keeps a bounded probe cache, dropping the oldest answer', async () => {
+  const probed: string[] = [];
+  const detector = createForgeDetector(async (instanceUrl) => { probed.push(instanceUrl); return false; });
+
+  for (let index = 0; index <= 256; index += 1) {
+    await detector.detect(`https://host-${index}.example/team/repo`);
+  }
+  assert.equal(probed.length, 257);
+
+  // host-1 is still cached; host-0 was evicted by host-256 and is asked again.
+  await detector.detect('https://host-1.example/team/repo');
+  assert.equal(probed.length, 257);
+  await detector.detect('https://host-0.example/team/repo');
+  assert.equal(probed.at(-1), 'https://host-0.example');
 });
 
 test('getTokenCredentialOrigin pins GitHub tokens to github.com and Forgejo tokens to https', () => {

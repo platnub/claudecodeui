@@ -7,7 +7,9 @@ import spawn from 'cross-spawn';
 import { forgejoTokensDb, githubTokensDb } from '@/modules/database/index.js';
 import {
   buildTokenCredentialEnvironment,
+  getRepositoryWebUrl,
   getTokenCredentialOrigin,
+  parseRepositoryUrl,
   resolveRepositoryForge,
   type ResolvedRepositoryForge,
 } from '@/modules/forges/index.js';
@@ -313,6 +315,16 @@ export async function startCloneProject(
       code: 'REPOSITORY_URL_CARRIES_CREDENTIALS',
       statusCode: 400,
     });
+  }
+
+  // A link copied from a repository page (`.../tree/main`) is not something
+  // git can clone; point at the repository URL instead of failing in git.
+  const parsedRepository = parseRepositoryUrl(normalizedRepositoryUrl);
+  if (parsedRepository?.webPagePath) {
+    throw new AppError(
+      `This is a link to a page of the repository, not the repository itself. Use ${getRepositoryWebUrl(parsedRepository)}`,
+      { code: 'REPOSITORY_URL_IS_WEB_PAGE', statusCode: 400 },
+    );
   }
 
   const pathValidation = await dependencies.validatePath(normalizedWorkspacePath);

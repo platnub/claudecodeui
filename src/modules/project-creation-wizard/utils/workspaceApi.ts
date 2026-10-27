@@ -1,4 +1,5 @@
 import { api } from '@/shared/api';
+import { FORGE_CREDENTIAL_TYPES } from '@/shared/constants';
 import type {
   FolderSuggestion,
   ForgeDetectionResult,
@@ -10,12 +11,6 @@ import type {
 type CredentialsResponse = {
   credentials?: ForgeTokenCredential[];
   error?: string;
-};
-
-/** The credential type each forge's tokens are stored under. */
-const FORGE_CREDENTIAL_TYPES: Record<GitForge, string> = {
-  github: 'github_token',
-  forgejo: 'forgejo_token',
 };
 
 type BrowseFilesystemResponse = {
