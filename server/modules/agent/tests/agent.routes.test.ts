@@ -505,8 +505,10 @@ test('Agent route rejects a forge value it does not know', async () => {
 test('Agent route pushes a branch and opens a Forgejo pull request for an ssh Forgejo remote', async () => {
   const spawnedArguments: string[][] = [];
   const pullRequests: unknown[] = [];
-  const spawnProcess = ((_command: string, args: readonly string[]) => {
+  const pushEnvironments: Array<NodeJS.ProcessEnv | undefined> = [];
+  const spawnProcess = ((_command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
     spawnedArguments.push([...args]);
+    if (args[0] === 'push') pushEnvironments.push(options.env);
     const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; stderr: PassThrough };
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
@@ -561,6 +563,13 @@ test('Agent route pushes a branch and opens a Forgejo pull request for an ssh Fo
   });
   assert.deepEqual(responseBody.pullRequest, { number: 7, url: 'https://git.example.com/team/repo/pulls/7' });
   assert.ok(spawnedArguments.some((args) => args.join(' ') === 'push -u origin feature/thing'));
+  // An ssh remote has no https origin to scope the token to: the push uses
+  // the machine's ssh keys and never sees the token.
+  const pushEnvironment = pushEnvironments[0];
+  assert.equal(pushEnvironments.length, 1);
+  assert.equal(pushEnvironment?.CLOUDCLI_GIT_TOKEN, undefined);
+  assert.equal(Object.values(pushEnvironment ?? {}).includes('forgejo-secret'), false);
+  assert.equal(pushEnvironment?.GIT_TERMINAL_PROMPT, '0');
   assert.equal(pullRequests.length, 1);
   const pullRequest = pullRequests[0] as { instanceUrl: string; token: string; head: string; base: string; title: string };
   assert.equal(pullRequest.instanceUrl, 'https://git.example.com');
@@ -572,11 +581,17 @@ test('Agent route pushes a branch and opens a Forgejo pull request for an ssh Fo
 
 /**
  * A git stand-in for the branch/PR path: `config` reports `remoteUrl`, every
- * other command succeeds. Records each command's arguments.
+ * other command succeeds. Records each command's arguments and, when asked,
+ * each push's environment.
  */
-function createGitRemoteSpawn(remoteUrl: string, spawnedArguments: string[][]) {
-  return ((_command: string, args: readonly string[]) => {
+function createGitRemoteSpawn(
+  remoteUrl: string,
+  spawnedArguments: string[][],
+  pushEnvironments: Array<NodeJS.ProcessEnv | undefined> = [],
+) {
+  return ((_command: string, args: readonly string[], options: { env?: NodeJS.ProcessEnv }) => {
     spawnedArguments.push([...args]);
+    if (args[0] === 'push') pushEnvironments.push(options.env);
     const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; stderr: PassThrough };
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
@@ -586,6 +601,54 @@ function createGitRemoteSpawn(remoteUrl: string, spawnedArguments: string[][]) {
     });
     return child;
   }) as unknown as AgentDependencies['spawnProcess'];
+}
+
+for (const { remoteUrl, token, credentialOrigin } of [
+  { remoteUrl: 'https://github.com/owner/repo.git', token: 'github-secret', credentialOrigin: 'https://github.com' },
+  { remoteUrl: 'https://git.example.com/team/repo.git', token: 'forgejo-secret', credentialOrigin: 'https://git.example.com' },
+]) {
+  test(`Agent route pushes the branch to ${remoteUrl} with the token scoped to ${credentialOrigin}`, async () => {
+    const spawnedArguments: string[][] = [];
+    const pushEnvironments: Array<NodeJS.ProcessEnv | undefined> = [];
+    let responseBody: { branch?: { name: string } } = {};
+
+    await withAgentServer(createDependencies({
+      fileSystem: { access: async () => undefined } as unknown as AgentDependencies['fileSystem'],
+      spawnProcess: createGitRemoteSpawn(remoteUrl, spawnedArguments, pushEnvironments),
+      models: {
+        getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'default-model' }),
+      } as unknown as AgentDependencies['models'],
+      queryClaude: (async () => undefined) as AgentDependencies['queryClaude'],
+      githubTokens: { getActiveGithubToken: () => 'github-secret' },
+      forgejoTokens: { getActiveForgejoToken: () => 'forgejo-secret' },
+    }), async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/agent`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          projectPath: '/home/test/project',
+          message: 'Add the feature',
+          branchName: 'feature/thing',
+          createBranch: true,
+          stream: false,
+        }),
+      });
+      assert.equal(response.status, 200);
+      responseBody = await response.json() as typeof responseBody;
+    });
+
+    assert.equal(responseBody.branch?.name, 'feature/thing');
+    const pushArguments = spawnedArguments.find((args) => args[0] === 'push');
+    assert.deepEqual(pushArguments, ['push', '-u', 'origin', 'feature/thing']);
+    assert.equal(spawnedArguments.flat().join(' ').includes(token), false);
+    assert.equal(pushEnvironments.length, 1);
+    const pushEnvironment = pushEnvironments[0];
+    assert.equal(pushEnvironment?.CLOUDCLI_GIT_TOKEN, token);
+    assert.equal(pushEnvironment?.GIT_CONFIG_KEY_0, 'credential.helper');
+    assert.equal(pushEnvironment?.GIT_CONFIG_VALUE_0, '');
+    assert.equal(pushEnvironment?.GIT_CONFIG_KEY_1, `credential.${credentialOrigin}.helper`);
+    assert.equal(pushEnvironment?.GIT_TERMINAL_PROMPT, '0');
+  });
 }
 
 for (const { remoteUrl, forge, expectedError } of [

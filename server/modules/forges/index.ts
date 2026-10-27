@@ -5,6 +5,8 @@ export { resolveRepositoryForge } from './forge-detection.service.js';
 export type { ResolvedRepositoryForge } from './forge-detection.service.js';
 // getTokenCredentialOrigin / buildTokenCredentialEnvironment: used by the projects clone service and the agent module to hand git a token for one origin only.
 export { buildTokenCredentialEnvironment, getTokenCredentialOrigin } from './git-credentials.service.js';
+// buildRemoteCredentialEnvironment: used by the git module so Source Control fetch/pull/push use the stored Forgejo token.
+export { buildRemoteCredentialEnvironment } from './git-credentials.service.js';
 // createForgejoPullRequest / getBranchWebUrl: used by the agent module to open Forgejo pull requests and link pushed branches.
 export { createForgejoPullRequest, getBranchWebUrl } from './forgejo-api.service.js';
 // parseRepositoryUrl / getRepositoryWebUrl: used by the agent module to compare checkouts and name the repository a PR goes to,
